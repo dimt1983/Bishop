@@ -25,11 +25,7 @@ async def _get_bot_username(bot: Bot) -> str:
 
 
 async def _reply_in_topic(message: Message, text: str):
-    """
-    Отвечает на сообщение с учётом форум-топика.
-    В форумах reply автоматически сохраняет thread, но если reply невозможен —
-    отправляем через bot.send_message с message_thread_id.
-    """
+    """Отвечает на сообщение с учётом форум-топика."""
     try:
         await message.reply(text)
     except Exception as e:
@@ -48,9 +44,7 @@ async def _reply_in_topic(message: Message, text: str):
 async def _get_chat_members_for_parsing(
     session, chat_id: int
 ) -> list[dict]:
-    """
-    Возвращает список пользователей которые писали в этом чате.
-    """
+    """Возвращает список пользователей которые писали в этом чате."""
     result = await session.execute(
         select(DBMessage.sender_id)
         .where(DBMessage.chat_id == chat_id)
@@ -94,6 +88,34 @@ async def handle_mention(message: Message, bot: Bot):
     if not await _is_mentioned(message, bot):
         return
 
+    # ВАЖНО: сразу сохраняем автора упоминания и само сообщение в БД,
+    # чтобы Claude видел его при парсинге задачи.
+    async with async_session_maker() as session:
+        user = await _ensure_user(session, message.from_user)
+        chat_result = await session.execute(
+            select(Chat).where(Chat.chat_id == message.chat.id)
+        )
+        chat = chat_result.scalar_one_or_none()
+        if chat and chat.is_active:
+            text_for_log = message.text or message.caption or ""
+            exists = await session.execute(
+                select(DBMessage).where(
+                    DBMessage.chat_id == message.chat.id,
+                    DBMessage.telegram_message_id == message.message_id,
+                )
+            )
+            if not exists.scalar_one_or_none():
+                db_msg = DBMessage(
+                    chat_id=message.chat.id,
+                    telegram_message_id=message.message_id,
+                    sender_id=message.from_user.id,
+                    sender_name=user.display_name,
+                    text=text_for_log,
+                    sent_at=message.date.astimezone(TZ).replace(tzinfo=None),
+                )
+                session.add(db_msg)
+                await session.commit()
+
     bot_username = await _get_bot_username(bot)
     text = (message.text or message.caption or "")
     cleaned = await _strip_mention(text, bot_username)
@@ -109,7 +131,11 @@ async def handle_mention(message: Message, bot: Bot):
         )
         return
 
-    lower = cleaned.lower()
+    lower = cleaned.lower().strip()
+
+    # Короткие реплики — здороваемся/отвечаем по-человечески
+    if await _handle_smalltalk(message, lower):
+        return
 
     if lower.startswith(("отмени", "отменить", "убери задачу")):
         await _handle_cancel_task(message, cleaned)
@@ -138,6 +164,16 @@ async def _handle_task_creation(message: Message, text: str, bot: Bot):
         creator = await _ensure_user(session, message.from_user)
 
         members = await _get_chat_members_for_parsing(session, message.chat.id)
+
+        # Гарантируем что постановщик в списке участников для парсера
+        creator_in_list = any(m["telegram_id"] == creator.telegram_id for m in members)
+        if not creator_in_list:
+            members.append({
+                "telegram_id": creator.telegram_id,
+                "name": creator.display_name,
+                "username": creator.username,
+            })
+
         if not members:
             await _reply_in_topic(
                 message,
@@ -318,3 +354,82 @@ async def _handle_search(message: Message, query: str):
 
         answer = await claude_service.search_chat_history(query, messages_data)
         await _reply_in_topic(message, answer)
+
+
+# ───────── Small-talk / короткие реплики ─────────
+
+_GREETINGS = {
+    "привет", "приветствую", "здорово", "здравствуй", "здравствуйте",
+    "добрый день", "доброе утро", "добрый вечер", "хай", "хэй", "йо",
+    "салам", "ку", "hi", "hello", "hey",
+}
+
+_ABOUT_QUERIES = {
+    "кто ты", "что ты", "что ты умеешь", "что умеешь", "ты кто",
+    "зачем ты", "расскажи о себе", "что ты можешь", "help", "помощь",
+    "/help", "команды", "как пользоваться",
+}
+
+_THANKS = {
+    "спасибо", "спс", "благодарю", "thanks", "thank you", "спасибочки",
+    "пасиб", "мерси",
+}
+
+_TESTS = {
+    "тест", "test", "проверка", "проверяю", "работаешь?", "работаешь",
+    "ты тут?", "ты тут", "ты здесь?", "ping",
+}
+
+
+async def _handle_smalltalk(message: Message, lower_text: str) -> bool:
+    """
+    Обрабатывает короткие реплики (привет, спасибо, тест).
+    Возвращает True если реплика обработана и дальше ничего делать не нужно.
+    """
+    # Убираем пунктуацию для сравнения
+    cleaned = lower_text.rstrip("!?.,")
+
+    # Приветствия
+    if cleaned in _GREETINGS or any(cleaned.startswith(g + " ") for g in _GREETINGS):
+        sender = message.from_user.first_name or "коллега"
+        await _reply_in_topic(
+            message,
+            f"Привет, {sender}! 👋\n\n"
+            f"Я Бишоп — помощник команды. Умею:\n"
+            f"• Ставить задачи: @bishoprb <кому> <что> <когда>\n"
+            f"• Искать по истории чата: @bishoprb <вопрос>\n"
+            f"• Напоминать исполнителям в личку\n\n"
+            f"Чтобы я мог писать тебе напоминания — напиши мне /start в личку.",
+        )
+        return True
+
+    # Вопросы о себе
+    if cleaned in _ABOUT_QUERIES or any(
+        cleaned.startswith(q + " ") or cleaned.startswith(q + "?") for q in _ABOUT_QUERIES
+    ):
+        await _reply_in_topic(
+            message,
+            "Я Бишоп, помощник команды RBR. 🤖\n\n"
+            "Что я делаю:\n"
+            "📋 Принимаю задачи: @bishoprb Лена, подготовь прайс к пятнице 18:00\n"
+            "🔍 Ищу по истории: @bishoprb когда обсуждали KAFFIT\n"
+            "🔔 Напоминаю исполнителям за сутки и в день дедлайна\n"
+            "✅ Принимаю \"готово\" в личке и закрываю задачу\n"
+            "📅 Переношу дедлайны: \"перенеси на понедельник\"\n"
+            "❌ Отменяю задачи по команде постановщика\n\n"
+            "Напишите мне в личку /что_ты_знаешь — расскажу подробнее.",
+        )
+        return True
+
+    # Благодарности
+    if cleaned in _THANKS:
+        await _reply_in_topic(message, "Всегда пожалуйста 🙂")
+        return True
+
+    # Тесты
+    if cleaned in _TESTS:
+        await _reply_in_topic(message, "Я здесь, работаю. ✅")
+        return True
+
+    return False
+
