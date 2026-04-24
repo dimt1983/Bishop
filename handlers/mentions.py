@@ -24,14 +24,33 @@ async def _get_bot_username(bot: Bot) -> str:
     return (me.username or "").lower()
 
 
+async def _reply_in_topic(message: Message, text: str):
+    """
+    Отвечает на сообщение с учётом форум-топика.
+    В форумах reply автоматически сохраняет thread, но если reply невозможен —
+    отправляем через bot.send_message с message_thread_id.
+    """
+    try:
+        await message.reply(text)
+    except Exception as e:
+        log.warning(f"reply() failed, trying send_message with thread: {e}")
+        thread_id = getattr(message, "message_thread_id", None)
+        try:
+            await message.bot.send_message(
+                chat_id=message.chat.id,
+                text=text,
+                message_thread_id=thread_id,
+            )
+        except Exception as e2:
+            log.error(f"Couldn't send reply at all: {e2}")
+
+
 async def _get_chat_members_for_parsing(
     session, chat_id: int
 ) -> list[dict]:
     """
-    Возвращает список пользователей которые писали в этом чате
-    (мы их парсили и складывали в User при логировании сообщений).
+    Возвращает список пользователей которые писали в этом чате.
     """
-    # Берём уникальных отправителей из Message
     result = await session.execute(
         select(DBMessage.sender_id)
         .where(DBMessage.chat_id == chat_id)
@@ -56,7 +75,6 @@ async def _get_chat_members_for_parsing(
 
 
 async def _is_mentioned(message: Message, bot: Bot) -> bool:
-    """Проверяет упомянут ли бот в сообщении."""
     if not (message.text or message.caption):
         return False
     text = (message.text or message.caption or "").lower()
@@ -65,7 +83,6 @@ async def _is_mentioned(message: Message, bot: Bot) -> bool:
 
 
 async def _strip_mention(text: str, bot_username: str) -> str:
-    """Убирает упоминание бота из текста."""
     import re
     pattern = re.compile(rf"@{re.escape(bot_username)}\b", re.IGNORECASE)
     return pattern.sub("", text).strip()
@@ -73,7 +90,7 @@ async def _strip_mention(text: str, bot_username: str) -> str:
 
 @router.message(F.chat.type.in_({"group", "supergroup"}) & (F.text | F.caption))
 async def handle_mention(message: Message, bot: Bot):
-    """Главный хэндлер для @bishoprb в чатах."""
+    """Главный хэндлер для @bishoprb в чатах (включая форумы с темами)."""
     if not await _is_mentioned(message, bot):
         return
 
@@ -82,25 +99,22 @@ async def handle_mention(message: Message, bot: Bot):
     cleaned = await _strip_mention(text, bot_username)
 
     if not cleaned:
-        await message.reply(
+        await _reply_in_topic(
+            message,
             "Напиши что-нибудь после @bishoprb.\n\n"
             "Примеры:\n"
             "• @bishoprb Лена, подготовь прайс к пятнице 18:00\n"
             "• @bishoprb когда мы обсуждали поставщика из Эфиопии?\n"
-            "• @bishoprb отмени задачу про прайс"
+            "• @bishoprb отмени задачу про прайс",
         )
         return
 
-    # Определяем что это: постановка задачи, вопрос, отмена, перенос
     lower = cleaned.lower()
 
-    # Отмена задачи
     if lower.startswith(("отмени", "отменить", "убери задачу")):
         await _handle_cancel_task(message, cleaned)
         return
 
-    # Попытка распарсить как задачу
-    # Эвристика: есть упоминание времени ИЛИ глагол в повелит./буд. наклонении ИЛИ явно есть имя
     looks_like_task = any(
         marker in lower
         for marker in [
@@ -116,41 +130,37 @@ async def handle_mention(message: Message, bot: Bot):
     if looks_like_task:
         await _handle_task_creation(message, cleaned, bot)
     else:
-        # Поиск по истории
         await _handle_search(message, cleaned)
 
 
 async def _handle_task_creation(message: Message, text: str, bot: Bot):
-    """Создаёт задачу через парсинг Claude."""
     async with async_session_maker() as session:
-        # Сохраняем пользователя-постановщика
         creator = await _ensure_user(session, message.from_user)
 
-        # Берём участников чата
         members = await _get_chat_members_for_parsing(session, message.chat.id)
         if not members:
-            await message.reply(
+            await _reply_in_topic(
+                message,
                 "Не могу понять кто в этом чате — пока никто не писал при мне. "
-                "Подождите пока участники поотвечают в чате, потом попробуйте снова."
+                "Подождите пока участники поотвечают в чате, потом попробуйте снова.",
             )
             return
 
         parsed = await claude_service.parse_task_creation(text, members)
 
         if not parsed.get("success"):
-            await message.reply(
+            await _reply_in_topic(
+                message,
                 f"❌ Не смог разобрать задачу.\n\n{parsed.get('error', '')}\n\n"
-                f"Пример: @bishoprb Лена, подготовь прайс к пятнице 18:00"
+                f"Пример: @bishoprb Лена, подготовь прайс к пятнице 18:00",
             )
             return
 
-        # Уточнение по одной/нескольким задачам
         if parsed.get("needs_clarification"):
             question = parsed.get(
                 "clarification_question",
                 "Это одна общая задача на всех или по одной каждому?",
             )
-            # Сохраняем pending
             import json as _json
             pending = PendingTaskClarification(
                 creator_id=creator.telegram_id,
@@ -162,13 +172,13 @@ async def _handle_task_creation(message: Message, text: str, bot: Bot):
             )
             session.add(pending)
             await session.commit()
-            await message.reply(
+            await _reply_in_topic(
+                message,
                 f"❓ {question}\n\n"
-                f"Ответьте: @bishoprb общая или @bishoprb каждому"
+                f"Ответьте: @bishoprb общая или @bishoprb каждому",
             )
             return
 
-        # Всё ок — создаём задачу
         deadline = datetime.fromisoformat(parsed["deadline_iso"])
         tasks = await task_service.create_task(
             session=session,
@@ -182,7 +192,6 @@ async def _handle_task_creation(message: Message, text: str, bot: Bot):
             is_shared=parsed.get("is_shared", True),
         )
 
-        # Подтверждение в чате
         assignee_names = ", ".join(parsed["assignee_names"])
         dm_warning = await _check_dm_status(session, parsed["assignee_ids"])
 
@@ -198,11 +207,10 @@ async def _handle_task_creation(message: Message, text: str, bot: Bot):
         if dm_warning:
             reply += f"\n\n⚠️ {dm_warning}"
 
-        await message.reply(reply)
+        await _reply_in_topic(message, reply)
 
 
 async def _check_dm_status(session, user_ids: list[int]) -> str:
-    """Проверяет кто из исполнителей не начал диалог с ботом."""
     result = await session.execute(
         select(User).where(User.telegram_id.in_(user_ids))
     )
@@ -218,9 +226,7 @@ async def _check_dm_status(session, user_ids: list[int]) -> str:
 
 
 async def _handle_cancel_task(message: Message, text: str):
-    """Отмена задачи постановщиком."""
     async with async_session_maker() as session:
-        # Найти открытые задачи созданные этим пользователем в этом чате
         from sqlalchemy.orm import selectinload
         from database import Task, TaskAssignee
 
@@ -234,15 +240,12 @@ async def _handle_cancel_task(message: Message, text: str):
         tasks = list(result.scalars().unique())
 
         if not tasks:
-            await message.reply("У вас нет открытых задач в этом чате.")
+            await _reply_in_topic(message, "У вас нет открытых задач в этом чате.")
             return
 
-        # Если одна — отменяем её
         if len(tasks) == 1:
             task = tasks[0]
             await task_service.cancel_task(session, task.id)
-            # Уведомляем исполнителей
-            from aiogram import Bot
             bot = message.bot
             for a in task.assignees:
                 if a.user.has_started_dm:
@@ -253,10 +256,9 @@ async def _handle_cancel_task(message: Message, text: str):
                         )
                     except Exception as e:
                         log.warning(f"Couldn't notify {a.user.telegram_id}: {e}")
-            await message.reply(f"✅ Задача отменена:\n📋 {task.description}")
+            await _reply_in_topic(message, f"✅ Задача отменена:\n📋 {task.description}")
             return
 
-        # Несколько — пытаемся через Claude понять какую
         tasks_info = [
             {
                 "id": t.id,
@@ -265,7 +267,6 @@ async def _handle_cancel_task(message: Message, text: str):
             }
             for t in tasks
         ]
-        # Используем understand_completion_reply с ключевым словом "отменить"
         result = await claude_service.understand_completion_reply(
             f"отмени эту задачу: {text}", tasks_info
         )
@@ -273,36 +274,36 @@ async def _handle_cancel_task(message: Message, text: str):
             task = next((t for t in tasks if t.id == result["task_id"]), None)
             if task:
                 await task_service.cancel_task(session, task.id)
-                await message.reply(f"✅ Задача отменена:\n📋 {task.description}")
+                await _reply_in_topic(message, f"✅ Задача отменена:\n📋 {task.description}")
                 return
 
-        # Непонятно — показываем список
         list_text = "\n".join(
             f"#{t.id} — {t.description} (до {t.deadline.strftime('%d.%m %H:%M')})"
             for t in tasks
         )
-        await message.reply(
+        await _reply_in_topic(
+            message,
             f"У вас несколько открытых задач. Уточните:\n\n{list_text}\n\n"
-            f"Напишите: @bishoprb отмени #<номер>"
+            f"Напишите: @bishoprb отмени #<номер>",
         )
 
 
 async def _handle_search(message: Message, query: str):
-    """Поиск по истории чата."""
     async with async_session_maker() as session:
         result = await session.execute(
             select(DBMessage)
             .where(DBMessage.chat_id == message.chat.id)
             .order_by(DBMessage.sent_at.desc())
-            .limit(300)  # Последние 300 сообщений — ограничение контекста Claude
+            .limit(300)
         )
         msgs = list(result.scalars().all())
-        msgs.reverse()  # Хронологический порядок
+        msgs.reverse()
 
         if not msgs:
-            await message.reply(
+            await _reply_in_topic(
+                message,
                 "В этом чате пока нет истории которую я видел. "
-                "Я запоминаю сообщения с момента как меня добавили в чат."
+                "Я запоминаю сообщения с момента как меня добавили в чат.",
             )
             return
 
@@ -316,4 +317,4 @@ async def _handle_search(message: Message, query: str):
         ]
 
         answer = await claude_service.search_chat_history(query, messages_data)
-        await message.reply(answer)
+        await _reply_in_topic(message, answer)
