@@ -9,7 +9,12 @@ from anthropic import AsyncAnthropic
 from config import settings
 from utils import log
 
-client = AsyncAnthropic(api_key=settings.anthropic_api_key)
+# Если задан ANTHROPIC_BASE_URL (например, для прокси типа proxyapi.ru) —
+# SDK будет использовать его вместо официального api.anthropic.com
+client = AsyncAnthropic(
+    api_key=settings.anthropic_api_key,
+    base_url=settings.anthropic_base_url,
+)
 TZ = ZoneInfo(settings.timezone)
 
 
@@ -28,16 +33,14 @@ async def parse_task_creation(
     {
         "success": bool,
         "error": str | None,
-        "assignee_ids": list[int],         # telegram_id исполнителей
-        "assignee_names": list[str],        # имена для сообщения
+        "assignee_ids": list[int],
+        "assignee_names": list[str],
         "description": str,
-        "deadline_iso": str,                # ISO формат
-        "is_shared": bool | None,           # None если нужно переспросить
-        "needs_clarification": bool,        # true если нужно уточнение
+        "deadline_iso": str,
+        "is_shared": bool | None,
+        "needs_clarification": bool,
         "clarification_question": str | None,
     }
-
-    chat_members — список {"telegram_id": int, "name": str, "username": str | None}
     """
     members_json = json.dumps(chat_members, ensure_ascii=False)
     now_iso = _now().strftime("%Y-%m-%d %H:%M:%S %z")
@@ -89,7 +92,6 @@ async def parse_task_creation(
             messages=[{"role": "user", "content": text}],
         )
         raw = response.content[0].text.strip()
-        # Убираем markdown fences если Claude их добавил
         if raw.startswith("```"):
             raw = raw.split("```")[1]
             if raw.startswith("json"):
@@ -111,20 +113,7 @@ async def understand_completion_reply(
     text: str,
     pending_tasks: list[dict],
 ) -> dict:
-    """
-    Определяет относится ли сообщение в личке к закрытию задачи.
-
-    pending_tasks: [{"id": int, "description": str, "deadline": str}, ...]
-
-    Возвращает:
-    {
-        "action": "complete" | "postpone" | "question" | "unknown",
-        "task_id": int | None,
-        "new_deadline_iso": str | None,
-        "clarification_needed": bool,
-        "clarification_question": str | None,
-    }
-    """
+    """Определяет относится ли сообщение в личке к закрытию задачи."""
     if not pending_tasks:
         return {"action": "unknown", "task_id": None}
 
@@ -180,11 +169,7 @@ async def search_chat_history(
     query: str,
     messages: list[dict],
 ) -> str:
-    """
-    Ищет ответ на вопрос по истории сообщений чата.
-
-    messages: [{"sender": str, "text": str, "sent_at": str}, ...]
-    """
+    """Ищет ответ на вопрос по истории сообщений чата."""
     if not messages:
         return "В истории этого чата пока ничего нет."
 
