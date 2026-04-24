@@ -41,6 +41,53 @@ async def _reply_in_topic(message: Message, text: str):
             log.error(f"Couldn't send reply at all: {e2}")
 
 
+async def _log_message_if_needed(message: Message):
+    """
+    Логирует сообщение в БД если этого ещё не сделал messages.py.
+    Нужно потому что сообщения с @bishop_rb_bot могут не попасть в messages.py
+    из-за порядка обработки роутеров.
+    """
+    if message.from_user is None or message.from_user.is_bot:
+        return
+    if not (message.text or message.caption):
+        return
+
+    async with async_session_maker() as session:
+        # Проверяем что чат активен
+        chat_result = await session.execute(
+            select(Chat).where(Chat.chat_id == message.chat.id)
+        )
+        chat = chat_result.scalar_one_or_none()
+        if chat is None or not chat.is_active:
+            return
+
+        # Проверяем что сообщение ещё не залогировано
+        exists = await session.execute(
+            select(DBMessage).where(
+                DBMessage.chat_id == message.chat.id,
+                DBMessage.telegram_message_id == message.message_id,
+            )
+        )
+        if exists.scalar_one_or_none():
+            # Уже есть в БД, не дублируем
+            return
+
+        # Создаём/обновляем пользователя и логируем сообщение
+        user = await _ensure_user(session, message.from_user)
+        text_for_log = message.text or message.caption or ""
+        
+        db_msg = DBMessage(
+            chat_id=message.chat.id,
+            telegram_message_id=message.message_id,
+            sender_id=message.from_user.id,
+            sender_name=user.display_name,
+            text=text_for_log,
+            sent_at=message.date.astimezone(TZ).replace(tzinfo=None),
+        )
+        session.add(db_msg)
+        await session.commit()
+
+
 async def _get_chat_members_for_parsing(
     session, chat_id: int
 ) -> list[dict]:
@@ -87,6 +134,9 @@ async def handle_mention(message: Message, bot: Bot):
     """Главный хэндлер для @bishoprb в чатах (включая форумы с темами)."""
     if not await _is_mentioned(message, bot):
         return
+
+    # ВАЖНО: логируем сообщение с упоминанием, чтобы автор попал в БД
+    await _log_message_if_needed(message)
 
     bot_username = await _get_bot_username(bot)
     text = (message.text or message.caption or "")
