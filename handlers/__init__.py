@@ -13,16 +13,17 @@ def get_main_router() -> Router:
     # События (добавление бота в чаты) — самый приоритет
     main.include_router(chat_events.router)
 
+    # OZON-агент (команды /ozon_*, фото с product_id) — ПЕРЕД private,
+    # чтобы фото и текст с product_id не перехватывал общий обработчик ЛС.
+    main.include_router(ozon.router)
+
     # ЛС с ботом
     main.include_router(private.router)
-
-    # OZON-агент (команды /ozon, /ozon_report, …)
-    main.include_router(ozon.router)
 
     # Упоминания в чатах
     main.include_router(mentions.router)
 
-    # Логирование всех сообщений (последним, чтобы не блокировать остальное)
+    # Логирование всех сообщений (последним)
     main.include_router(messages.router)
 
     return main
