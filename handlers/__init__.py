@@ -1,80 +1,31 @@
 from aiogram import Router
-from handlers import chat_events, messages, mentions, private
 
-# Пробуем импортировать OZON агента (безопасно)
-try:
-    from handlers.ozon_agent_aiogram_fixed import ozon_router
-    OZON_AVAILABLE = True
-except ImportError:
-    OZON_AVAILABLE = False
+from handlers import chat_events, messages, mentions, private, ozon
 
-# Импортируем диагностику OZON
-try:
-    from handlers.ozon_diagnostics import ozon_diag_router
-    OZON_DIAG_AVAILABLE = True
-except ImportError:
-    OZON_DIAG_AVAILABLE = False
-
-# Импортируем OZON 2024
-try:
-    from handlers.ozon_2024 import ozon_2024_router
-    OZON_2024_AVAILABLE = True
-except ImportError:
-    OZON_2024_AVAILABLE = False
-
-# Импортируем финальную рабочую версию OZON
-try:
-    from handlers.ozon_working_final import ozon_working_new_router
-    OZON_WORKING_NEW_AVAILABLE = True
-except ImportError:
-    OZON_WORKING_NEW_AVAILABLE = False
-
-# Импортируем универсальный тестер OZON
-try:
-    from handlers.ozon_universal_tester import ozon_universal_router
-    OZON_UNIVERSAL_AVAILABLE = True
-except ImportError:
-    OZON_UNIVERSAL_AVAILABLE = False
 
 def get_main_router() -> Router:
     """
-    Возвращает главный роутер со всеми подключенными хэндлерами.
+    Возвращает главный роутер со всеми подключёнными хэндлерами.
     Порядок важен: сначала специфичные, потом общие.
     """
     main = Router()
-    
+
     # События (добавление бота в чаты) — самый приоритет
     main.include_router(chat_events.router)
-    
+
     # ЛС с ботом
     main.include_router(private.router)
-    
-    # OZON агент (если доступен)
-    if OZON_AVAILABLE:
-        main.include_router(ozon_router)
-    
-    # OZON диагностика (если доступна)
-    if OZON_DIAG_AVAILABLE:
-        main.include_router(ozon_diag_router)
-    
-    # OZON 2024 API (если доступен)
-    if OZON_2024_AVAILABLE:
-        main.include_router(ozon_2024_router)
-    
-    # OZON рабочие методы (финальная версия)
-    if OZON_WORKING_NEW_AVAILABLE:
-        main.include_router(ozon_working_new_router)
-    
-    # OZON универсальный тестер
-    if OZON_UNIVERSAL_AVAILABLE:
-        main.include_router(ozon_universal_router)
-    
+
+    # OZON-агент (команды /ozon, /ozon_report, …)
+    main.include_router(ozon.router)
+
     # Упоминания в чатах
     main.include_router(mentions.router)
-    
-    # Логирование всех сообщений (должно быть последним чтобы не блокировать остальное)
+
+    # Логирование всех сообщений (последним, чтобы не блокировать остальное)
     main.include_router(messages.router)
-    
+
     return main
+
 
 __all__ = ["get_main_router"]
