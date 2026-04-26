@@ -287,27 +287,73 @@ async def on_review_callback(call: CallbackQuery) -> None:
 # Загрузка фото в карточку
 # --------------------------------------------------------------------------- #
 
+# Запоминаем последнее фото от каждого пользователя в каждом чате,
+# чтобы можно было прислать фото и отдельным сообщением — product_id
+_last_photo: dict[tuple[int, int], str] = {}  # (chat_id, user_id) -> file_id
+
+
 @router.message(F.photo & F.caption.regexp(r"product_id\s*:\s*\d+"))
 async def on_photo_with_caption(message: Message, bot: Bot) -> None:
-    """Фото с подписью вида `product_id:54576571` → грузим в карточку."""
+    """Фото с подписью вида `product_id:54576571` → сразу грузим в карточку."""
     caption = message.caption or ""
     match = re.search(r"product_id\s*:\s*(\d+)", caption)
+    if not match or not message.photo:
+        return
+    product_id = int(match.group(1))
+    file_id = message.photo[-1].file_id
+    await _upload_photo_to_ozon(message, bot, product_id, file_id)
+
+
+@router.message(F.photo)
+async def on_photo_without_caption(message: Message) -> None:
+    """Фото без подписи — запоминаем, ждём product_id отдельным сообщением."""
+    if not message.photo or not message.from_user:
+        return
+    # Если в подписи всё-таки есть product_id — этот хэндлер не сработает
+    # (выше есть более специфичный с фильтром caption.regexp).
+    key = (message.chat.id, message.from_user.id)
+    _last_photo[key] = message.photo[-1].file_id
+    await message.answer(
+        "📷 Фото получил. Теперь пришли отдельным сообщением:\n"
+        "<code>product_id:54576571</code>\n\n"
+        "(Или сразу прикрепляй фото с подписью — это удобнее.)",
+        parse_mode=ParseMode.HTML,
+    )
+
+
+@router.message(F.text.regexp(r"^\s*product_id\s*:\s*\d+\s*$"))
+async def on_product_id_after_photo(message: Message, bot: Bot) -> None:
+    """Текст `product_id:NNN` отдельным сообщением — берём последнее фото."""
+    if not message.text or not message.from_user:
+        return
+    match = re.search(r"product_id\s*:\s*(\d+)", message.text)
     if not match:
         return
     product_id = int(match.group(1))
 
-    if not message.photo:
+    key = (message.chat.id, message.from_user.id)
+    file_id = _last_photo.pop(key, None)
+    if not file_id:
+        await message.answer(
+            "📷 Не вижу фото в памяти — сначала пришли картинку, потом этот код.\n"
+            "Либо сразу отправь фото с подписью <code>product_id:54576571</code>.",
+            parse_mode=ParseMode.HTML,
+        )
         return
-    # Берём самое крупное превью
-    photo = message.photo[-1]
+    await _upload_photo_to_ozon(message, bot, product_id, file_id)
 
+
+async def _upload_photo_to_ozon(
+    message: Message, bot: Bot, product_id: int, file_id: str
+) -> None:
+    """Скачать file_id из Telegram и залить URL в карточку OZON."""
     await message.answer(
         f"⏳ Загружаю фото в карточку <code>{product_id}</code>…",
         parse_mode=ParseMode.HTML,
     )
 
     try:
-        file = await bot.get_file(photo.file_id)
+        file = await bot.get_file(file_id)
         if not file.file_path:
             await message.answer("❌ Не удалось получить файл из Telegram.")
             return
@@ -576,7 +622,7 @@ async def _run_reviews(message: Message) -> None:
     await message.answer("⏳ Беру необработанные отзывы…")
     try:
         api = OzonAPI()
-        data = await api.get_reviews(status="UNPROCESSED", limit=10)
+        data = await api.get_reviews(status="UNPROCESSED", limit=20)
     except OzonAPIError as e:
         if e.status in (402, 403):
             await message.answer(
