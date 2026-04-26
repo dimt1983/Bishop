@@ -29,6 +29,13 @@ try:
 except ImportError:
     OZON_WORKING_NEW_AVAILABLE = False
 
+# Импортируем универсальный тестер OZON
+try:
+    from handlers.ozon_universal_tester import ozon_universal_router
+    OZON_UNIVERSAL_AVAILABLE = True
+except ImportError:
+    OZON_UNIVERSAL_AVAILABLE = False
+
 def get_main_router() -> Router:
     """
     Возвращает главный роутер со всеми подключенными хэндлерами.
@@ -57,6 +64,10 @@ def get_main_router() -> Router:
     # OZON рабочие методы (финальная версия)
     if OZON_WORKING_NEW_AVAILABLE:
         main.include_router(ozon_working_new_router)
+    
+    # OZON универсальный тестер
+    if OZON_UNIVERSAL_AVAILABLE:
+        main.include_router(ozon_universal_router)
     
     # Упоминания в чатах
     main.include_router(mentions.router)
