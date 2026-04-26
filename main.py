@@ -1,6 +1,10 @@
 """BishopRB — внутренний AI-помощник команды RBR."""
 import asyncio
 
+from handlers.ozon_agent import ozon_handlers, send_daily_summary_to_chat
+from datetime import time
+import os
+
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
@@ -46,3 +50,17 @@ if __name__ == "__main__":
         asyncio.run(main())
     except (KeyboardInterrupt, SystemExit):
         log.info("Bot stopped")
+
+# Добавить OZON обработчики
+for handler in ozon_handlers:
+    application.add_handler(handler)
+
+# Настроить ежедневные сводки в 9:00 МСК
+chat_id = os.getenv("OZON_DAILY_CHAT_ID", "-1003522003335")
+job_queue = application.job_queue
+job_queue.run_daily(
+    send_daily_summary_to_chat,
+    time=time(hour=6, minute=0),  # 9:00 MSK = 6:00 UTC
+    data={"chat_id": chat_id},
+    name="ozon_daily_summary"
+)
