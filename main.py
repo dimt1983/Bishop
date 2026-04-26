@@ -6,17 +6,9 @@ from config import settings
 from database import init_db
 from handlers import get_main_router
 from handlers.debug_ozon import debug_ozon_router  # Простая отладка
+from handlers.ozon_working import ozon_simple_router  # Рабочий OZON
 from services.reminder_service import setup_scheduler
 from utils import log
-
-# Пробуем подключить OZON агента если файлы есть
-try:
-    from handlers.ozon_agent_aiogram_fixed import ozon_router
-    OZON_AGENT_AVAILABLE = True
-    log.info("OZON agent module found")
-except ImportError as e:
-    OZON_AGENT_AVAILABLE = False
-    log.warning(f"OZON agent module not available: {e}")
 
 
 async def main():
@@ -37,14 +29,10 @@ async def main():
     dp = Dispatcher()
     dp.include_router(get_main_router())
     
-    # Простая OZON отладка (всегда работает)
-    dp.include_router(debug_ozon_router)
-    log.info("OZON debug commands loaded")
-    
-    # Полный OZON агент (если доступен)
-    if OZON_AGENT_AVAILABLE:
-        dp.include_router(ozon_router)
-        log.info("Full OZON agent loaded")
+    # OZON команды
+    dp.include_router(debug_ozon_router)  # /oztest, /ozstatus
+    dp.include_router(ozon_simple_router)  # /ozon_simple
+    log.info("OZON modules loaded")
     
     scheduler = setup_scheduler(bot)
     scheduler.start()
