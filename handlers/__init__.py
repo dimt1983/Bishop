@@ -16,20 +16,18 @@ except ImportError:
     OZON_DIAG_AVAILABLE = False
 
 # Импортируем OZON 2024
-
-try:
-    from handlers.ozon_working_final import ozon_working_new_router
-    OZON_WORKING_NEW_AVAILABLE = True
-except ImportError:
-    OZON_WORKING_NEW_AVAILABLE = False
-
-
-    
 try:
     from handlers.ozon_2024 import ozon_2024_router
     OZON_2024_AVAILABLE = True
 except ImportError:
     OZON_2024_AVAILABLE = False
+
+# Импортируем финальную рабочую версию OZON
+try:
+    from handlers.ozon_working_final import ozon_working_new_router
+    OZON_WORKING_NEW_AVAILABLE = True
+except ImportError:
+    OZON_WORKING_NEW_AVAILABLE = False
 
 def get_main_router() -> Router:
     """
@@ -37,8 +35,7 @@ def get_main_router() -> Router:
     Порядок важен: сначала специфичные, потом общие.
     """
     main = Router()
-    if OZON_WORKING_NEW_AVAILABLE:
-        main.include_router(ozon_working_new_router)
+    
     # События (добавление бота в чаты) — самый приоритет
     main.include_router(chat_events.router)
     
@@ -56,6 +53,10 @@ def get_main_router() -> Router:
     # OZON 2024 API (если доступен)
     if OZON_2024_AVAILABLE:
         main.include_router(ozon_2024_router)
+    
+    # OZON рабочие методы (финальная версия)
+    if OZON_WORKING_NEW_AVAILABLE:
+        main.include_router(ozon_working_new_router)
     
     # Упоминания в чатах
     main.include_router(mentions.router)
