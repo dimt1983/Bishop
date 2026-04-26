@@ -182,7 +182,7 @@ async def _run_orders_today(message: Message) -> None:
         await message.answer(f"❌ Ошибка: {e}")
         return
 
-    postings = data.get("result", []) or []
+    postings = _extract_postings(data)
     if not postings:
         await message.answer("📭 Сегодня заказов FBS пока нет.")
         return
@@ -279,7 +279,7 @@ async def _run_report(message: Message) -> None:
         await message.answer(f"❌ Ошибка: {e}")
         return
 
-    postings = orders_data.get("result", []) or []
+    postings = _extract_postings(orders_data)
     stocks = stocks_data.get("result", {}).get("rows", []) or []
 
     # 2. Агрегация
@@ -364,6 +364,21 @@ async def send_daily_report(bot, chat_id: int | str) -> None:
 # --------------------------------------------------------------------------- #
 # Вспомогательное
 # --------------------------------------------------------------------------- #
+
+def _extract_postings(data: dict) -> list[dict]:
+    """
+    Достаёт список заказов из ответа OZON.
+
+    Формат /v3/posting/fbs/list: {"result": {"postings": [...], "has_next": bool}}
+    Но на всякий случай поддерживаем и старый формат, где result — это сразу список.
+    """
+    result = data.get("result", [])
+    if isinstance(result, list):
+        return result
+    if isinstance(result, dict):
+        return result.get("postings", []) or []
+    return []
+
 
 def _format_orders(postings: list[dict], header: str) -> str:
     """Короткое представление списка заказов."""
