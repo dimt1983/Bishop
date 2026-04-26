@@ -9,6 +9,15 @@ from handlers.debug_ozon import debug_ozon_router  # Простая отладк
 from services.reminder_service import setup_scheduler
 from utils import log
 
+# Пробуем подключить OZON агента если файлы есть
+try:
+    from handlers.ozon_agent_aiogram_fixed import ozon_router
+    OZON_AGENT_AVAILABLE = True
+    log.info("OZON agent module found")
+except ImportError as e:
+    OZON_AGENT_AVAILABLE = False
+    log.warning(f"OZON agent module not available: {e}")
+
 
 async def main():
     log.info("Starting BishopRB...")
@@ -28,9 +37,14 @@ async def main():
     dp = Dispatcher()
     dp.include_router(get_main_router())
     
-    # Простая OZON отладка
+    # Простая OZON отладка (всегда работает)
     dp.include_router(debug_ozon_router)
     log.info("OZON debug commands loaded")
+    
+    # Полный OZON агент (если доступен)
+    if OZON_AGENT_AVAILABLE:
+        dp.include_router(ozon_router)
+        log.info("Full OZON agent loaded")
     
     scheduler = setup_scheduler(bot)
     scheduler.start()
