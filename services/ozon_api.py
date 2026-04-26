@@ -101,12 +101,27 @@ class OzonAPI:
         return await self._post("/v1/product/info/description", payload)
 
     async def get_product_attributes(
-        self, product_ids: list[int], limit: int = 100
+        self,
+        product_ids: list[int] | None = None,
+        offer_ids: list[str] | None = None,
+        limit: int = 100,
+        last_id: str = "",
     ) -> dict[str, Any]:
-        """Атрибуты товаров — там лежит название и описание."""
+        """
+        Атрибуты товаров — там лежат название и описание.
+
+        Если product_ids/offer_ids не указаны, вернёт все товары магазина
+        (страницами по limit штук, продолжать через last_id из ответа).
+        """
+        filter_block: dict[str, Any] = {"visibility": "ALL"}
+        if product_ids:
+            filter_block["product_id"] = [str(pid) for pid in product_ids]
+        if offer_ids:
+            filter_block["offer_id"] = list(offer_ids)
         payload = {
-            "filter": {"product_id": [str(pid) for pid in product_ids], "visibility": "ALL"},
+            "filter": filter_block,
             "limit": limit,
+            "last_id": last_id,
             "sort_dir": "ASC",
         }
         return await self._post("/v4/product/info/attributes", payload)
@@ -267,13 +282,29 @@ class OzonAPI:
         Загрузить фото в карточку товара.
         images — список URL картинок (OZON сам их скачает).
         Первое фото в списке становится главным.
+
+        ВАЖНО:
+        - product_id OZON ждёт как число (int)
+        - color_image и images360 передаём только если есть значение
+        - дубликаты URL OZON не принимает
         """
-        payload = {
+        # Снимаем дубликаты, сохраняя порядок
+        seen: set[str] = set()
+        clean_images: list[str] = []
+        for url in images:
+            if url and url not in seen:
+                seen.add(url)
+                clean_images.append(url)
+
+        payload: dict[str, Any] = {
             "product_id": product_id,
-            "images": images,
-            "images360": images360 or [],
-            "color_image": color_image,
+            "images": clean_images,
         }
+        if color_image:
+            payload["color_image"] = color_image
+        if images360:
+            payload["images360"] = images360
+
         return await self._post("/v1/product/pictures/import", payload)
 
     # ------------------------------------------------------------------ #
