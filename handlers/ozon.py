@@ -565,6 +565,12 @@ async def _upload_photo_to_ozon(
             )
 
         # 4. Грузим
+        log.info(
+            f"OZON pictures upload: product_id={product_id}, "
+            f"existing={len(existing_urls)}, new={len(new_urls)}, "
+            f"combined={len(combined)}, has_color={bool(existing_color)}, "
+            f"has_360={len(existing_360)}"
+        )
         result = await api.upload_product_pictures(
             product_id=product_id,
             images=combined,
@@ -572,12 +578,23 @@ async def _upload_photo_to_ozon(
             images360=existing_360,
         )
     except OzonAPIError as e:
+        log.warning(f"OZON pictures upload failed [{e.status}]: {e.message}")
+        # Дружелюбное объяснение известных кодов
+        hint = ""
+        if e.status == 400 and "VALIDATION" in e.message.upper():
+            hint = (
+                "\n\n💡 Возможные причины:\n"
+                "• Telegram-ссылка истекла (попробуй ещё раз — у каждой загрузки свой URL)\n"
+                "• Картинка слишком большая или нестандартный формат\n"
+                "• Превышен лимит 15 фото на карточку"
+            )
         await message.answer(
-            f"❌ OZON отклонил загрузку [{e.status}]:\n<code>{e.message[:500]}</code>",
+            f"❌ OZON отклонил загрузку [{e.status}]:\n<code>{_html_escape(e.message[:500])}</code>{hint}",
             parse_mode=ParseMode.HTML,
         )
         return
     except Exception as e:
+        log.exception("Pictures upload error")
         await message.answer(f"❌ Ошибка: {e}")
         return
 
