@@ -506,53 +506,65 @@ async def _handle_album_photo(
 
 async def _telegram_to_public_url(bot: Bot, file_id: str) -> str | None:
     """
-    Telegram → catbox.moe → публичный URL.
+    Telegram → ImgBB → публичный URL.
 
-    Catbox.moe — бесплатный анонимный хостинг файлов без API-ключа.
-    OZON принимает оттуда картинки. Лимит файла 200 МБ, никаких ограничений по hotlink.
+    ImgBB — бесплатный хостинг с API. Нужен ключ из IMGBB_API_KEY.
+    Получить ключ: https://api.imgbb.com/ → Get API key.
+
+    OZON принимает картинки с i.ibb.co — это CDN ImgBB.
     """
+    import os
+    import base64
     import aiohttp
 
-    # 1. Получаем content из Telegram
+    imgbb_key = os.getenv("IMGBB_API_KEY")
+    if not imgbb_key:
+        log.error("IMGBB_API_KEY is not set in Railway variables")
+        return None
+
+    # 1. Скачиваем из Telegram
     file = await bot.get_file(file_id)
     if not file.file_path:
         return None
     tg_url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
 
     async with aiohttp.ClientSession() as session:
-        # Скачиваем
         async with session.get(tg_url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
             if resp.status != 200:
                 log.warning(f"Cannot download from Telegram: HTTP {resp.status}")
                 return None
             content = await resp.read()
-            content_type = resp.headers.get("Content-Type", "image/jpeg")
 
-        # Заливаем на catbox.moe
-        # API: POST на https://catbox.moe/user/api.php
-        # Поля: reqtype=fileupload, fileToUpload=<файл>
-        filename = (file.file_path.rsplit("/", 1)[-1]) or "image.jpg"
+        # 2. Заливаем в ImgBB.
+        # API: POST https://api.imgbb.com/1/upload?key=KEY
+        # Body (form): image=<base64-encoded image>
+        b64 = base64.b64encode(content).decode("ascii")
         form = aiohttp.FormData()
-        form.add_field("reqtype", "fileupload")
-        form.add_field(
-            "fileToUpload",
-            content,
-            filename=filename,
-            content_type=content_type,
-        )
+        form.add_field("image", b64)
+
         async with session.post(
-            "https://catbox.moe/user/api.php",
+            f"https://api.imgbb.com/1/upload?key={imgbb_key}",
             data=form,
             timeout=aiohttp.ClientTimeout(total=120),
         ) as up:
             if up.status != 200:
-                log.warning(f"Catbox upload failed: HTTP {up.status}")
+                text = (await up.text())[:300]
+                log.warning(f"ImgBB upload failed: HTTP {up.status} — {text}")
                 return None
-            text = (await up.text()).strip()
-            if not text.startswith("https://"):
-                log.warning(f"Catbox returned unexpected response: {text[:200]}")
+            try:
+                data = await up.json()
+            except Exception as e:
+                log.warning(f"ImgBB returned non-JSON: {e}")
                 return None
-            return text
+            if not data.get("success"):
+                log.warning(f"ImgBB upload not successful: {data}")
+                return None
+            # Берём прямой URL картинки (i.ibb.co)
+            image_url = (data.get("data") or {}).get("url")
+            if not image_url:
+                log.warning(f"ImgBB response has no url: {data}")
+                return None
+            return image_url
 
 
 async def _upload_photo_to_ozon(
@@ -591,10 +603,21 @@ async def _upload_photo_to_ozon(
                 log.warning(f"Photo {i}/{n} failed to upload to host")
 
         if not new_urls:
-            await message.answer(
-                "❌ Не удалось залить ни одной картинки на промежуточный хостинг.\n"
-                "Попробуй ещё раз — возможно, временная проблема с catbox.moe."
-            )
+            import os
+            if not os.getenv("IMGBB_API_KEY"):
+                await message.answer(
+                    "❌ Не задан <code>IMGBB_API_KEY</code> в переменных Railway.\n\n"
+                    "1. Открой https://api.imgbb.com/\n"
+                    "2. Get API key (вход через Google)\n"
+                    "3. Скопируй ключ\n"
+                    "4. Railway → Variables → добавь <code>IMGBB_API_KEY=твой_ключ</code>",
+                    parse_mode=ParseMode.HTML,
+                )
+            else:
+                await message.answer(
+                    "❌ Не удалось залить ни одной картинки на промежуточный хостинг (ImgBB).\n"
+                    "Проверь логи Railway."
+                )
             return
         if failed:
             await message.answer(f"⚠️ {failed} из {n} фото не удалось подготовить, продолжаю с остальными.")
