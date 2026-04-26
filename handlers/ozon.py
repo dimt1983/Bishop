@@ -504,28 +504,103 @@ async def _handle_album_photo(
     asyncio.create_task(_process_album())
 
 
+async def _telegram_to_public_url(bot: Bot, file_id: str) -> str | None:
+    """
+    Telegram → catbox.moe → публичный URL.
+
+    Catbox.moe — бесплатный анонимный хостинг файлов без API-ключа.
+    OZON принимает оттуда картинки. Лимит файла 200 МБ, никаких ограничений по hotlink.
+    """
+    import aiohttp
+
+    # 1. Получаем content из Telegram
+    file = await bot.get_file(file_id)
+    if not file.file_path:
+        return None
+    tg_url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
+
+    async with aiohttp.ClientSession() as session:
+        # Скачиваем
+        async with session.get(tg_url, timeout=aiohttp.ClientTimeout(total=60)) as resp:
+            if resp.status != 200:
+                log.warning(f"Cannot download from Telegram: HTTP {resp.status}")
+                return None
+            content = await resp.read()
+            content_type = resp.headers.get("Content-Type", "image/jpeg")
+
+        # Заливаем на catbox.moe
+        # API: POST на https://catbox.moe/user/api.php
+        # Поля: reqtype=fileupload, fileToUpload=<файл>
+        filename = (file.file_path.rsplit("/", 1)[-1]) or "image.jpg"
+        form = aiohttp.FormData()
+        form.add_field("reqtype", "fileupload")
+        form.add_field(
+            "fileToUpload",
+            content,
+            filename=filename,
+            content_type=content_type,
+        )
+        async with session.post(
+            "https://catbox.moe/user/api.php",
+            data=form,
+            timeout=aiohttp.ClientTimeout(total=120),
+        ) as up:
+            if up.status != 200:
+                log.warning(f"Catbox upload failed: HTTP {up.status}")
+                return None
+            text = (await up.text()).strip()
+            if not text.startswith("https://"):
+                log.warning(f"Catbox returned unexpected response: {text[:200]}")
+                return None
+            return text
+
+
 async def _upload_photo_to_ozon(
     message: Message, bot: Bot, product_id: int, file_ids: list[str]
 ) -> None:
     """
-    Загрузить одну или несколько картинок в карточку OZON.
+    Загрузить картинки в карточку OZON.
 
-    ВАЖНО: метод /v1/product/pictures/import заменяет ВСЕ картинки.
-    Поэтому сначала достаём существующие и добавляем новые в конец.
+    Алгоритм:
+    1. Скачиваем каждый файл из Telegram
+    2. Перезаливаем на catbox.moe (получаем публичный URL без токенов)
+    3. Подтягиваем существующие картинки из карточки
+    4. Объединяем (existing + new), убираем дубликаты, режем до 15
+    5. Отдаём OZON одним вызовом
     """
     if not file_ids:
         return
     n = len(file_ids)
     await message.answer(
-        f"⏳ Загружаю {n} фото в карточку <code>{product_id}</code> "
-        f"(сохраняю существующие)…",
+        f"⏳ Готовлю {n} фото для карточки <code>{product_id}</code>…\n"
+        f"<i>(скачиваю из Telegram, заливаю на хостинг, проверяю существующие)</i>",
         parse_mode=ParseMode.HTML,
     )
 
     try:
-        api = OzonAPI()
+        # 1. Telegram → публичные URL
+        new_urls: list[str] = []
+        failed = 0
+        for i, fid in enumerate(file_ids, 1):
+            url = await _telegram_to_public_url(bot, fid)
+            if url:
+                new_urls.append(url)
+                log.info(f"Photo {i}/{n} uploaded to host: {url}")
+            else:
+                failed += 1
+                log.warning(f"Photo {i}/{n} failed to upload to host")
 
-        # 1. Достаём текущие картинки, чтобы не затереть их
+        if not new_urls:
+            await message.answer(
+                "❌ Не удалось залить ни одной картинки на промежуточный хостинг.\n"
+                "Попробуй ещё раз — возможно, временная проблема с catbox.moe."
+            )
+            return
+        if failed:
+            await message.answer(f"⚠️ {failed} из {n} фото не удалось подготовить, продолжаю с остальными.")
+
+        # 2. Достаём существующие картинки карточки
+        api = OzonAPI()
         existing_urls: list[str] = []
         existing_color: str = ""
         existing_360: list[str] = []
@@ -539,38 +614,26 @@ async def _upload_photo_to_ozon(
                 existing_360 = list(first.get("images360", []) or [])
         except OzonAPIError as e:
             log.warning(f"Could not fetch existing pictures for {product_id}: {e}")
-            # Продолжаем — лучше хоть как-то загрузить, чем не загрузить вовсе
         except Exception as e:
             log.warning(f"Unexpected error fetching pictures for {product_id}: {e}")
 
-        # 2. Готовим URL новых файлов из Telegram
-        new_urls: list[str] = []
-        for fid in file_ids:
-            file = await bot.get_file(fid)
-            if not file.file_path:
-                continue
-            new_urls.append(f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}")
-
-        if not new_urls:
-            await message.answer("❌ Не удалось получить файлы из Telegram.")
-            return
-
-        # 3. Объединяем: существующие + новые. OZON лимит — 15 картинок на товар.
+        # 3. Объединяем
         combined = existing_urls + new_urls
         if len(combined) > 15:
-            combined = combined[-15:]  # оставляем последние 15
+            combined = combined[-15:]
             await message.answer(
                 f"⚠️ В карточке уже было {len(existing_urls)} фото. "
                 f"OZON лимит — 15, оставлю самые свежие."
             )
 
-        # 4. Грузим
+        # 4. Логируем что отправляем
         log.info(
             f"OZON pictures upload: product_id={product_id}, "
             f"existing={len(existing_urls)}, new={len(new_urls)}, "
-            f"combined={len(combined)}, has_color={bool(existing_color)}, "
-            f"has_360={len(existing_360)}"
+            f"combined={len(combined)}"
         )
+
+        # 5. Грузим
         result = await api.upload_product_pictures(
             product_id=product_id,
             images=combined,
@@ -579,14 +642,13 @@ async def _upload_photo_to_ozon(
         )
     except OzonAPIError as e:
         log.warning(f"OZON pictures upload failed [{e.status}]: {e.message}")
-        # Дружелюбное объяснение известных кодов
         hint = ""
         if e.status == 400 and "VALIDATION" in e.message.upper():
             hint = (
                 "\n\n💡 Возможные причины:\n"
-                "• Telegram-ссылка истекла (попробуй ещё раз — у каждой загрузки свой URL)\n"
-                "• Картинка слишком большая или нестандартный формат\n"
-                "• Превышен лимит 15 фото на карточку"
+                "• Картинка слишком маленькая (мин. 200×200) или повреждена\n"
+                "• Слишком большой файл (макс. 10 МБ)\n"
+                "• Неподдерживаемый формат (нужен JPG/PNG/WEBP)"
             )
         await message.answer(
             f"❌ OZON отклонил загрузку [{e.status}]:\n<code>{_html_escape(e.message[:500])}</code>{hint}",
@@ -598,11 +660,10 @@ async def _upload_photo_to_ozon(
         await message.answer(f"❌ Ошибка: {e}")
         return
 
-    # OZON в ответе возвращает массив с pictureId/state
     pictures = result.get("result", {}).get("pictures", []) or result.get("pictures", []) or []
     total_in_card = len(combined)
     await message.answer(
-        f"✅ Загружено новых: <b>{n}</b>\n"
+        f"✅ Загружено новых: <b>{len(new_urls)}</b>\n"
         f"Всего в карточке после загрузки: <b>{total_in_card}</b>\n"
         f"product_id: <code>{product_id}</code>\n\n"
         f"Картинки уйдут на модерацию OZON, появятся через несколько часов.",
