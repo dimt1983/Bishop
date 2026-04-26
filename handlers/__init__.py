@@ -8,6 +8,13 @@ try:
 except ImportError:
     OZON_AVAILABLE = False
 
+# Импортируем диагностику OZON
+try:
+    from handlers.ozon_diagnostics import ozon_diag_router
+    OZON_DIAG_AVAILABLE = True
+except ImportError:
+    OZON_DIAG_AVAILABLE = False
+
 def get_main_router() -> Router:
     """
     Возвращает главный роутер со всеми подключенными хэндлерами.
@@ -24,6 +31,10 @@ def get_main_router() -> Router:
     # OZON агент (если доступен)
     if OZON_AVAILABLE:
         main.include_router(ozon_router)
+    
+    # OZON диагностика (если доступна)
+    if OZON_DIAG_AVAILABLE:
+        main.include_router(ozon_diag_router)
     
     # Упоминания в чатах
     main.include_router(mentions.router)
