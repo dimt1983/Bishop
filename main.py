@@ -5,7 +5,7 @@ from aiogram.client.default import DefaultBotProperties
 from config import settings
 from database import init_db
 from handlers import get_main_router
-from handlers.ozon_agent_aiogram_fixed import ozon_router
+from handlers.debug_ozon import debug_ozon_router  # Простая отладка
 from services.reminder_service import setup_scheduler
 from utils import log
 
@@ -28,9 +28,9 @@ async def main():
     dp = Dispatcher()
     dp.include_router(get_main_router())
     
-    # Подключаем OZON агента
-    dp.include_router(ozon_router)
-    log.info("OZON Agent loaded")
+    # Простая OZON отладка
+    dp.include_router(debug_ozon_router)
+    log.info("OZON debug commands loaded")
     
     scheduler = setup_scheduler(bot)
     scheduler.start()
