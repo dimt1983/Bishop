@@ -241,17 +241,19 @@ async def on_callback(call: CallbackQuery, bot: Bot) -> None:
             asyncio.create_task(_run_seo_all(call.message, bot))
     elif action == "photo_help":
         await call.message.answer(
-            "📷 <b>Как добавить фото в карточку товара</b>\n\n"
-            "<b>Способ 1 (быстрее):</b>\n"
-            "Прикрепи фото через ⊕ → <i>Фото или видео</i> "
-            "(не Файл!) → в подпись напиши <code>product_id:54576571</code>\n\n"
-            "<b>Способ 2 (в два шага):</b>\n"
-            "1. Отправь фото\n"
-            "2. Следующим сообщением: <code>product_id:54576571</code>\n\n"
-            "<b>Поддерживаются:</b> JPG/PNG как фото или как файл.\n"
-            "<b>Размер:</b> до 10 МБ.\n\n"
-            "После загрузки фото уйдёт на модерацию OZON, "
-            "появится в карточке через несколько часов.",
+            "📷 <b>Как добавить фото в карточку</b>\n\n"
+            "<b>Главное:</b> существующие фото <b>сохраняются</b>, новые добавляются в конец. "
+            "Лимит OZON — 15 фото на карточку.\n\n"
+            "<b>Способ 1 — одно фото с подписью:</b>\n"
+            "Прикрепи фото → в подпись напиши <code>product_id:54576571</code>\n\n"
+            "<b>Способ 2 — несколько фото пачкой:</b>\n"
+            "Выдели в галерее 2+ фото → отправь альбомом → "
+            "у первого фото в подписи напиши <code>product_id:54576571</code>\n\n"
+            "<b>Способ 3 — пачкой в два шага:</b>\n"
+            "1. Пришли несколько фото (по одному или альбомом, без подписи)\n"
+            "2. Следующим сообщением: <code>product_id:54576571</code>\n"
+            "Бот загрузит все накопленные фото разом.\n\n"
+            "<b>Поддерживается:</b> JPG/PNG как фото или как файл (оригинал без сжатия — лучше).",
             parse_mode=ParseMode.HTML,
         )
     elif action == "help":
@@ -340,39 +342,67 @@ async def on_review_callback(call: CallbackQuery) -> None:
 # Загрузка фото в карточку
 # --------------------------------------------------------------------------- #
 
-# Запоминаем последнее фото от каждого пользователя, чтобы можно было
-# присылать фото и product_id отдельными сообщениями.
-_last_photo: dict[tuple[int, int], str] = {}
+# Запоминаем последние фото от пользователя (накопительно).
+# Сбрасывается после успешной отправки в OZON или по таймауту.
+_pending_photos: dict[tuple[int, int], list[str]] = {}
+
+# Буфер для альбомов: media_group_id → список file_id.
+# Telegram присылает альбом несколькими сообщениями подряд с одинаковым media_group_id.
+_album_buffer: dict[str, list[str]] = {}
+
+
+def _add_pending_photo(chat_id: int, user_id: int, file_id: str) -> int:
+    key = (chat_id, user_id)
+    bucket = _pending_photos.setdefault(key, [])
+    if file_id not in bucket:
+        bucket.append(file_id)
+    return len(bucket)
+
+
+def _take_pending_photos(chat_id: int, user_id: int) -> list[str]:
+    return _pending_photos.pop((chat_id, user_id), [])
 
 
 @router.message(F.photo & F.caption.regexp(r"product_id\s*:\s*\d+"))
 async def on_photo_with_caption(message: Message, bot: Bot) -> None:
-    """Фото с подписью `product_id:N` → сразу грузим в карточку."""
+    """Фото с подписью `product_id:N` → грузим в карточку (с учётом альбома)."""
     caption = message.caption or ""
     match = re.search(r"product_id\s*:\s*(\d+)", caption)
     if not match or not message.photo:
         return
     product_id = int(match.group(1))
     file_id = message.photo[-1].file_id
-    await _upload_photo_to_ozon(message, bot, product_id, file_id)
+
+    # Если это первое сообщение альбома — будут ещё; собираем все, потом грузим
+    if message.media_group_id:
+        await _handle_album_photo(message, bot, file_id, product_id)
+        return
+
+    await _upload_photo_to_ozon(message, bot, product_id, [file_id])
 
 
 @router.message(F.photo)
 async def on_photo_without_caption(message: Message) -> None:
-    """Фото без подписи — запоминаем, ждём product_id отдельно."""
+    """Фото без подписи. Запоминаем; ждём product_id отдельным сообщением."""
     if not message.photo or not message.from_user:
         return
-    key = (message.chat.id, message.from_user.id)
-    _last_photo[key] = message.photo[-1].file_id
-    await message.answer(
-        "📷 Фото получил. Теперь пришли отдельным сообщением:\n"
-        "<code>product_id:54576571</code>\n\n"
-        "(Или сразу прикрепляй фото с подписью — это удобнее.)",
-        parse_mode=ParseMode.HTML,
-    )
+    file_id = message.photo[-1].file_id
+
+    if message.media_group_id:
+        # Альбом без подписи — копим в общий буфер пользователя
+        await _handle_album_photo(message, None, file_id, product_id=None)
+        return
+
+    count = _add_pending_photo(message.chat.id, message.from_user.id, file_id)
+    if count == 1:
+        await message.answer(
+            "📷 Фото получил. Можешь прислать ещё фото или сразу написать:\n"
+            "<code>product_id:54576571</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
 
-# --- Картинка как ДОКУМЕНТ (когда отправлено через "Файл", не "Фото") ----- #
+# --- Картинка как ДОКУМЕНТ -------------------------------------------------- #
 
 def _is_image_document(message: Message) -> bool:
     if not message.document:
@@ -383,7 +413,7 @@ def _is_image_document(message: Message) -> bool:
 
 @router.message(F.document & F.caption.regexp(r"product_id\s*:\s*\d+"))
 async def on_doc_image_with_caption(message: Message, bot: Bot) -> None:
-    """Картинка как файл с подписью `product_id:N` → грузим в карточку."""
+    """Картинка как файл с подписью."""
     if not _is_image_document(message) or not message.document:
         return
     caption = message.caption or ""
@@ -391,26 +421,28 @@ async def on_doc_image_with_caption(message: Message, bot: Bot) -> None:
     if not match:
         return
     product_id = int(match.group(1))
-    await _upload_photo_to_ozon(message, bot, product_id, message.document.file_id)
+    await _upload_photo_to_ozon(message, bot, product_id, [message.document.file_id])
 
 
 @router.message(F.document)
 async def on_doc_image_without_caption(message: Message) -> None:
-    """Картинка как файл без подписи — запоминаем, ждём product_id."""
+    """Картинка как файл без подписи. Накапливаем."""
     if not _is_image_document(message) or not message.document or not message.from_user:
         return
-    key = (message.chat.id, message.from_user.id)
-    _last_photo[key] = message.document.file_id
-    await message.answer(
-        "📎 Картинку (файл) получил. Теперь пришли отдельным сообщением:\n"
-        "<code>product_id:54576571</code>",
-        parse_mode=ParseMode.HTML,
-    )
+    count = _add_pending_photo(message.chat.id, message.from_user.id, message.document.file_id)
+    if count == 1:
+        await message.answer(
+            "📎 Картинку (файл) получил. Можешь прислать ещё или сразу написать:\n"
+            "<code>product_id:54576571</code>",
+            parse_mode=ParseMode.HTML,
+        )
 
+
+# --- Команда product_id отдельным сообщением -------------------------------- #
 
 @router.message(F.text.regexp(r"^\s*product_id\s*:\s*\d+\s*$"))
 async def on_product_id_after_photo(message: Message, bot: Bot) -> None:
-    """Текст `product_id:N` отдельным сообщением — берём последнее фото."""
+    """Текст `product_id:N` отдельным сообщением — грузим все накопленные фото."""
     if not message.text or not message.from_user:
         return
     match = re.search(r"product_id\s*:\s*(\d+)", message.text)
@@ -418,33 +450,127 @@ async def on_product_id_after_photo(message: Message, bot: Bot) -> None:
         return
     product_id = int(match.group(1))
 
-    key = (message.chat.id, message.from_user.id)
-    file_id = _last_photo.pop(key, None)
-    if not file_id:
+    file_ids = _take_pending_photos(message.chat.id, message.from_user.id)
+    if not file_ids:
         await message.answer(
-            "📷 Не вижу фото в памяти — сначала пришли картинку, потом этот код.",
+            "📷 В памяти нет фото. Сначала пришли картинку (или несколько), потом этот код.",
             parse_mode=ParseMode.HTML,
         )
         return
-    await _upload_photo_to_ozon(message, bot, product_id, file_id)
+    await _upload_photo_to_ozon(message, bot, product_id, file_ids)
+
+
+# --- Альбом (несколько фото одним сообщением) ------------------------------- #
+
+async def _handle_album_photo(
+    message: Message,
+    bot: Bot | None,
+    file_id: str,
+    product_id: int | None,
+) -> None:
+    """
+    Накапливаем фото из media_group и через 1.5 секунды грузим всё пачкой
+    (1.5 сек — Telegram отправляет элементы альбома почти одновременно).
+    """
+    group_id = message.media_group_id or ""
+    bucket = _album_buffer.setdefault(group_id, [])
+    is_first = len(bucket) == 0
+    if file_id not in bucket:
+        bucket.append(file_id)
+
+    if not is_first:
+        return  # таймер уже запущен первым сообщением альбома
+
+    # Запускаем отложенную обработку альбома
+    async def _process_album():
+        await asyncio.sleep(1.5)
+        ids = _album_buffer.pop(group_id, [])
+        if not ids:
+            return
+
+        if product_id is not None and bot is not None:
+            # Альбом с подписью — сразу грузим в указанный product_id
+            await _upload_photo_to_ozon(message, bot, product_id, ids)
+        elif message.from_user:
+            # Альбом без подписи — складываем в общий буфер пользователя
+            for fid in ids:
+                _add_pending_photo(message.chat.id, message.from_user.id, fid)
+            await message.answer(
+                f"📷 Получил альбом: {len(ids)} фото. Пришли отдельным сообщением:\n"
+                f"<code>product_id:54576571</code>",
+                parse_mode=ParseMode.HTML,
+            )
+
+    asyncio.create_task(_process_album())
 
 
 async def _upload_photo_to_ozon(
-    message: Message, bot: Bot, product_id: int, file_id: str
+    message: Message, bot: Bot, product_id: int, file_ids: list[str]
 ) -> None:
-    """Скачать file_id из Telegram и залить URL в карточку OZON."""
+    """
+    Загрузить одну или несколько картинок в карточку OZON.
+
+    ВАЖНО: метод /v1/product/pictures/import заменяет ВСЕ картинки.
+    Поэтому сначала достаём существующие и добавляем новые в конец.
+    """
+    if not file_ids:
+        return
+    n = len(file_ids)
     await message.answer(
-        f"⏳ Загружаю фото в карточку <code>{product_id}</code>…",
+        f"⏳ Загружаю {n} фото в карточку <code>{product_id}</code> "
+        f"(сохраняю существующие)…",
         parse_mode=ParseMode.HTML,
     )
+
     try:
-        file = await bot.get_file(file_id)
-        if not file.file_path:
-            await message.answer("❌ Не удалось получить файл из Telegram.")
-            return
-        url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
         api = OzonAPI()
-        result = await api.upload_product_pictures(product_id=product_id, images=[url])
+
+        # 1. Достаём текущие картинки, чтобы не затереть их
+        existing_urls: list[str] = []
+        existing_color: str = ""
+        existing_360: list[str] = []
+        try:
+            current = await api.get_product_pictures([product_id])
+            items = current.get("items", []) or current.get("result", []) or []
+            if items:
+                first = items[0] if isinstance(items, list) else items
+                existing_urls = list(first.get("images", []) or [])
+                existing_color = first.get("color_image", "") or ""
+                existing_360 = list(first.get("images360", []) or [])
+        except OzonAPIError as e:
+            log.warning(f"Could not fetch existing pictures for {product_id}: {e}")
+            # Продолжаем — лучше хоть как-то загрузить, чем не загрузить вовсе
+        except Exception as e:
+            log.warning(f"Unexpected error fetching pictures for {product_id}: {e}")
+
+        # 2. Готовим URL новых файлов из Telegram
+        new_urls: list[str] = []
+        for fid in file_ids:
+            file = await bot.get_file(fid)
+            if not file.file_path:
+                continue
+            new_urls.append(f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}")
+
+        if not new_urls:
+            await message.answer("❌ Не удалось получить файлы из Telegram.")
+            return
+
+        # 3. Объединяем: существующие + новые. OZON лимит — 15 картинок на товар.
+        combined = existing_urls + new_urls
+        if len(combined) > 15:
+            combined = combined[-15:]  # оставляем последние 15
+            await message.answer(
+                f"⚠️ В карточке уже было {len(existing_urls)} фото. "
+                f"OZON лимит — 15, оставлю самые свежие."
+            )
+
+        # 4. Грузим
+        result = await api.upload_product_pictures(
+            product_id=product_id,
+            images=combined,
+            color_image=existing_color,
+            images360=existing_360,
+        )
     except OzonAPIError as e:
         await message.answer(
             f"❌ OZON отклонил загрузку [{e.status}]:\n<code>{e.message[:500]}</code>",
@@ -455,11 +581,14 @@ async def _upload_photo_to_ozon(
         await message.answer(f"❌ Ошибка: {e}")
         return
 
-    pictures = result.get("result", {}).get("pictures", []) or []
+    # OZON в ответе возвращает массив с pictureId/state
+    pictures = result.get("result", {}).get("pictures", []) or result.get("pictures", []) or []
+    total_in_card = len(combined)
     await message.answer(
-        f"✅ Фото отправлено на модерацию OZON.\n"
-        f"product_id: <code>{product_id}</code>\n"
-        f"Всего картинок в карточке: {len(pictures)}",
+        f"✅ Загружено новых: <b>{n}</b>\n"
+        f"Всего в карточке после загрузки: <b>{total_in_card}</b>\n"
+        f"product_id: <code>{product_id}</code>\n\n"
+        f"Картинки уйдут на модерацию OZON, появятся через несколько часов.",
         parse_mode=ParseMode.HTML,
     )
 
