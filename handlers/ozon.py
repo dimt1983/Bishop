@@ -14,12 +14,15 @@ OZON-хендлер для Bishop.
     /ozon_prices   — текущие цены
 
 AI-операции:
-    /ozon_seo <product_id>      — улучшить название и описание карточки
+    /ozon_seo <product_id>      — улучшить одну карточку
+    /ozon_seo_all               — пакетный SEO: пройти по всем товарам
+    /ozon_seo_stop              — прервать пакетный SEO
     /ozon_reviews               — необработанные отзывы + AI-ответы
     Фото с подписью product_id:N — загрузить картинку в карточку
 """
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import re
@@ -50,9 +53,12 @@ ATTR_NAME = 9048
 ATTR_DESCRIPTION = 4191
 
 
-# Кэш черновиков SEO/ответов на отзыв между нажатиями кнопок (in-memory).
-# Ключ — короткий токен, значение — данные.
+# Кэш черновиков SEO/ответов на отзыв (ожидающих подтверждения кнопкой).
 _pending: dict[str, dict] = {}
+
+# Состояние пакетного SEO. Один в момент времени, чтобы не флудить.
+_seo_all_active: bool = False
+_seo_all_stop: bool = False
 
 
 # --------------------------------------------------------------------------- #
@@ -75,7 +81,12 @@ def main_menu_kb() -> InlineKeyboardMarkup:
                 InlineKeyboardButton(text="💬 Отзывы", callback_data="ozon:reviews"),
             ],
             [
+                InlineKeyboardButton(text="✨ SEO всех товаров", callback_data="ozon:seo_all"),
+                InlineKeyboardButton(text="📷 Как добавить фото", callback_data="ozon:photo_help"),
+            ],
+            [
                 InlineKeyboardButton(text="🔧 Проверка API", callback_data="ozon:check"),
+                InlineKeyboardButton(text="❓ Все команды", callback_data="ozon:help"),
             ],
         ]
     )
@@ -108,7 +119,9 @@ async def cmd_help(message: Message) -> None:
         "/ozon_stocks — остатки\n"
         "/ozon_prices — текущие цены\n\n"
         "<b>AI-операции:</b>\n"
-        "/ozon_seo &lt;product_id&gt; — улучшить карточку\n"
+        "/ozon_seo &lt;product_id&gt; — улучшить одну карточку\n"
+        "/ozon_seo_all — пакетный SEO: пройти по всем товарам\n"
+        "/ozon_seo_stop — прервать пакетный SEO\n"
         "/ozon_reviews — отзывы + AI-ответы\n"
         "Фото с подписью <code>product_id:54576571</code> — добавить картинку в карточку"
     )
@@ -162,6 +175,31 @@ async def cmd_seo(message: Message) -> None:
     await _run_seo(message, product_id)
 
 
+@router.message(Command("ozon_seo_all"))
+async def cmd_seo_all(message: Message, bot: Bot) -> None:
+    """Запустить пакетный SEO по всем товарам."""
+    global _seo_all_active
+    if _seo_all_active:
+        await message.answer(
+            "⚠️ Пакетный SEO уже выполняется. Дождись завершения "
+            "или останови командой /ozon_seo_stop."
+        )
+        return
+    # Запускаем в фоне, чтобы не блокировать остальные команды
+    asyncio.create_task(_run_seo_all(message, bot))
+
+
+@router.message(Command("ozon_seo_stop"))
+async def cmd_seo_stop(message: Message) -> None:
+    """Остановить пакетный SEO после текущего товара."""
+    global _seo_all_stop
+    if not _seo_all_active:
+        await message.answer("Пакетный SEO сейчас не выполняется.")
+        return
+    _seo_all_stop = True
+    await message.answer("⏸ Остановлю после текущего товара…")
+
+
 @router.message(Command("ozon_reviews"))
 async def cmd_reviews(message: Message) -> None:
     await _run_reviews(message)
@@ -172,7 +210,7 @@ async def cmd_reviews(message: Message) -> None:
 # --------------------------------------------------------------------------- #
 
 @router.callback_query(F.data.startswith("ozon:"))
-async def on_callback(call: CallbackQuery) -> None:
+async def on_callback(call: CallbackQuery, bot: Bot) -> None:
     if not call.message or not isinstance(call.message, Message):
         await call.answer()
         return
@@ -193,6 +231,31 @@ async def on_callback(call: CallbackQuery) -> None:
         await _run_reviews(call.message)
     elif action == "check":
         await _run_check(call.message)
+    elif action == "seo_all":
+        global _seo_all_active
+        if _seo_all_active:
+            await call.message.answer(
+                "⚠️ Пакетный SEO уже выполняется. /ozon_seo_stop для остановки."
+            )
+        else:
+            asyncio.create_task(_run_seo_all(call.message, bot))
+    elif action == "photo_help":
+        await call.message.answer(
+            "📷 <b>Как добавить фото в карточку товара</b>\n\n"
+            "<b>Способ 1 (быстрее):</b>\n"
+            "Прикрепи фото через ⊕ → <i>Фото или видео</i> "
+            "(не Файл!) → в подпись напиши <code>product_id:54576571</code>\n\n"
+            "<b>Способ 2 (в два шага):</b>\n"
+            "1. Отправь фото\n"
+            "2. Следующим сообщением: <code>product_id:54576571</code>\n\n"
+            "<b>Поддерживаются:</b> JPG/PNG как фото или как файл.\n"
+            "<b>Размер:</b> до 10 МБ.\n\n"
+            "После загрузки фото уйдёт на модерацию OZON, "
+            "появится в карточке через несколько часов.",
+            parse_mode=ParseMode.HTML,
+        )
+    elif action == "help":
+        await cmd_help(call.message)
 
 
 @router.callback_query(F.data.startswith("seo:"))
@@ -210,7 +273,7 @@ async def on_seo_callback(call: CallbackQuery) -> None:
         return
 
     if action == "cancel":
-        await call.message.answer("❌ Изменения отклонены.")
+        await call.message.answer(f"❌ Изменения для <code>{draft.get('offer_id', '?')}</code> отклонены.", parse_mode=ParseMode.HTML)
         return
 
     try:
@@ -219,30 +282,20 @@ async def on_seo_callback(call: CallbackQuery) -> None:
             {
                 "offer_id": draft["offer_id"],
                 "attributes": [
-                    {
-                        "complex_id": 0,
-                        "id": ATTR_NAME,
-                        "values": [{"value": draft["name"]}],
-                    },
-                    {
-                        "complex_id": 0,
-                        "id": ATTR_DESCRIPTION,
-                        "values": [{"value": draft["description"]}],
-                    },
+                    {"complex_id": 0, "id": ATTR_NAME, "values": [{"value": draft["name"]}]},
+                    {"complex_id": 0, "id": ATTR_DESCRIPTION, "values": [{"value": draft["description"]}]},
                 ],
             }
         ]
         result = await api.update_product_attributes(items)
         await call.message.answer(
-            f"✅ Изменения отправлены на модерацию OZON.\n"
-            f"Артикул: <code>{draft['offer_id']}</code>\n"
-            f"task_id: <code>{result.get('task_id', '?')}</code>\n\n"
-            f"Модерация обычно занимает несколько часов.",
+            f"✅ <code>{draft['offer_id']}</code> отправлен на модерацию.\n"
+            f"task_id: <code>{result.get('task_id', '?')}</code>",
             parse_mode=ParseMode.HTML,
         )
     except OzonAPIError as e:
         await call.message.answer(
-            f"❌ OZON отклонил обновление [{e.status}]:\n<code>{e.message[:500]}</code>",
+            f"❌ OZON отклонил [{e.status}]:\n<code>{e.message[:500]}</code>",
             parse_mode=ParseMode.HTML,
         )
     except Exception as e:
@@ -287,14 +340,14 @@ async def on_review_callback(call: CallbackQuery) -> None:
 # Загрузка фото в карточку
 # --------------------------------------------------------------------------- #
 
-# Запоминаем последнее фото от каждого пользователя в каждом чате,
-# чтобы можно было прислать фото и отдельным сообщением — product_id
-_last_photo: dict[tuple[int, int], str] = {}  # (chat_id, user_id) -> file_id
+# Запоминаем последнее фото от каждого пользователя, чтобы можно было
+# присылать фото и product_id отдельными сообщениями.
+_last_photo: dict[tuple[int, int], str] = {}
 
 
 @router.message(F.photo & F.caption.regexp(r"product_id\s*:\s*\d+"))
 async def on_photo_with_caption(message: Message, bot: Bot) -> None:
-    """Фото с подписью вида `product_id:54576571` → сразу грузим в карточку."""
+    """Фото с подписью `product_id:N` → сразу грузим в карточку."""
     caption = message.caption or ""
     match = re.search(r"product_id\s*:\s*(\d+)", caption)
     if not match or not message.photo:
@@ -306,11 +359,9 @@ async def on_photo_with_caption(message: Message, bot: Bot) -> None:
 
 @router.message(F.photo)
 async def on_photo_without_caption(message: Message) -> None:
-    """Фото без подписи — запоминаем, ждём product_id отдельным сообщением."""
+    """Фото без подписи — запоминаем, ждём product_id отдельно."""
     if not message.photo or not message.from_user:
         return
-    # Если в подписи всё-таки есть product_id — этот хэндлер не сработает
-    # (выше есть более специфичный с фильтром caption.regexp).
     key = (message.chat.id, message.from_user.id)
     _last_photo[key] = message.photo[-1].file_id
     await message.answer(
@@ -321,9 +372,45 @@ async def on_photo_without_caption(message: Message) -> None:
     )
 
 
+# --- Картинка как ДОКУМЕНТ (когда отправлено через "Файл", не "Фото") ----- #
+
+def _is_image_document(message: Message) -> bool:
+    if not message.document:
+        return False
+    mime = (message.document.mime_type or "").lower()
+    return mime.startswith("image/")
+
+
+@router.message(F.document & F.caption.regexp(r"product_id\s*:\s*\d+"))
+async def on_doc_image_with_caption(message: Message, bot: Bot) -> None:
+    """Картинка как файл с подписью `product_id:N` → грузим в карточку."""
+    if not _is_image_document(message) or not message.document:
+        return
+    caption = message.caption or ""
+    match = re.search(r"product_id\s*:\s*(\d+)", caption)
+    if not match:
+        return
+    product_id = int(match.group(1))
+    await _upload_photo_to_ozon(message, bot, product_id, message.document.file_id)
+
+
+@router.message(F.document)
+async def on_doc_image_without_caption(message: Message) -> None:
+    """Картинка как файл без подписи — запоминаем, ждём product_id."""
+    if not _is_image_document(message) or not message.document or not message.from_user:
+        return
+    key = (message.chat.id, message.from_user.id)
+    _last_photo[key] = message.document.file_id
+    await message.answer(
+        "📎 Картинку (файл) получил. Теперь пришли отдельным сообщением:\n"
+        "<code>product_id:54576571</code>",
+        parse_mode=ParseMode.HTML,
+    )
+
+
 @router.message(F.text.regexp(r"^\s*product_id\s*:\s*\d+\s*$"))
 async def on_product_id_after_photo(message: Message, bot: Bot) -> None:
-    """Текст `product_id:NNN` отдельным сообщением — берём последнее фото."""
+    """Текст `product_id:N` отдельным сообщением — берём последнее фото."""
     if not message.text or not message.from_user:
         return
     match = re.search(r"product_id\s*:\s*(\d+)", message.text)
@@ -335,8 +422,7 @@ async def on_product_id_after_photo(message: Message, bot: Bot) -> None:
     file_id = _last_photo.pop(key, None)
     if not file_id:
         await message.answer(
-            "📷 Не вижу фото в памяти — сначала пришли картинку, потом этот код.\n"
-            "Либо сразу отправь фото с подписью <code>product_id:54576571</code>.",
+            "📷 Не вижу фото в памяти — сначала пришли картинку, потом этот код.",
             parse_mode=ParseMode.HTML,
         )
         return
@@ -351,14 +437,12 @@ async def _upload_photo_to_ozon(
         f"⏳ Загружаю фото в карточку <code>{product_id}</code>…",
         parse_mode=ParseMode.HTML,
     )
-
     try:
         file = await bot.get_file(file_id)
         if not file.file_path:
             await message.answer("❌ Не удалось получить файл из Telegram.")
             return
         url = f"https://api.telegram.org/file/bot{bot.token}/{file.file_path}"
-
         api = OzonAPI()
         result = await api.upload_product_pictures(product_id=product_id, images=[url])
     except OzonAPIError as e:
@@ -386,7 +470,6 @@ async def _upload_photo_to_ozon(
 
 async def _run_check(message: Message) -> None:
     lines = ["🔧 <b>Проверка подключений</b>\n"]
-
     try:
         api = OzonAPI()
         result = await api.get_products_list(limit=1)
@@ -432,7 +515,6 @@ async def _run_orders_today(message: Message) -> None:
     if not postings:
         await message.answer("📭 Сегодня заказов FBS пока нет.")
         return
-
     text = _format_orders(postings, header=f"🛒 <b>Заказы FBS за сегодня</b> ({len(postings)} шт.)")
     await message.answer(text, parse_mode=ParseMode.HTML)
 
@@ -530,8 +612,12 @@ async def _run_prices(message: Message) -> None:
     await message.answer("\n".join(lines), parse_mode=ParseMode.HTML)
 
 
+# --------------------------------------------------------------------------- #
+# SEO одной карточки
+# --------------------------------------------------------------------------- #
+
 async def _run_seo(message: Message, product_id: int) -> None:
-    """Улучшить название и описание карточки."""
+    """Улучшить название и описание одной карточки."""
     await message.answer(
         f"⏳ Беру карточку <code>{product_id}</code>…",
         parse_mode=ParseMode.HTML,
@@ -585,6 +671,22 @@ async def _run_seo(message: Message, product_id: int) -> None:
     new_desc = result.get("description", description).strip()
     rationale = result.get("rationale", "").strip()
 
+    await _send_seo_preview(
+        message, product_id, offer_id, name, description, new_name, new_desc, rationale
+    )
+
+
+async def _send_seo_preview(
+    message: Message,
+    product_id: int,
+    offer_id: str,
+    old_name: str,
+    old_desc: str,
+    new_name: str,
+    new_desc: str,
+    rationale: str,
+) -> None:
+    """Показать «было/стало» с кнопками применения."""
     token = _make_token()
     _pending[token] = {
         "offer_id": offer_id,
@@ -594,12 +696,12 @@ async def _run_seo(message: Message, product_id: int) -> None:
     }
 
     text = (
-        f"<b>SEO-улучшение карточки</b> <code>{product_id}</code>\n"
+        f"<b>SEO-улучшение</b> <code>{product_id}</code>\n"
         f"Артикул: <code>{offer_id}</code>\n\n"
-        f"<b>Название было:</b>\n{_html_escape(name)}\n\n"
+        f"<b>Название было:</b>\n{_html_escape(old_name)}\n\n"
         f"<b>Стало:</b>\n{_html_escape(new_name)}\n\n"
-        f"<b>Описание было</b> ({len(description)} симв.):\n{_html_escape(description[:300])}"
-        f"{'…' if len(description) > 300 else ''}\n\n"
+        f"<b>Описание было</b> ({len(old_desc)} симв.):\n{_html_escape(old_desc[:300])}"
+        f"{'…' if len(old_desc) > 300 else ''}\n\n"
         f"<b>Стало</b> ({len(new_desc)} симв.):\n{_html_escape(new_desc[:300])}"
         f"{'…' if len(new_desc) > 300 else ''}"
     )
@@ -614,8 +716,157 @@ async def _run_seo(message: Message, product_id: int) -> None:
             ]
         ]
     )
+    # Telegram режет сообщения после 4096 символов — обрезаем безопасно
+    if len(text) > 4000:
+        text = text[:3990] + "…"
     await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
+
+# --------------------------------------------------------------------------- #
+# Пакетный SEO по всем товарам
+# --------------------------------------------------------------------------- #
+
+# Пауза между товарами, чтобы не флудить чат и не упереться в rate-limits
+_SEO_ALL_DELAY_SEC = 2.0
+
+
+async def _run_seo_all(message: Message, bot: Bot) -> None:
+    """Пройти по всем товарам, для каждого предложить SEO-улучшение."""
+    global _seo_all_active, _seo_all_stop
+    _seo_all_active = True
+    _seo_all_stop = False
+
+    try:
+        await message.answer(
+            "⏳ Беру все товары магазина…\n"
+            "Для каждого подготовлю превью «было/стало» с кнопками. "
+            "Прервать в любой момент: /ozon_seo_stop"
+        )
+
+        # 1. Собираем полный список товаров с пагинацией
+        api = OzonAPI()
+        all_products: list[dict] = []
+        last_id = ""
+        try:
+            while True:
+                page = await api.get_products_list(limit=200, last_id=last_id)
+                items = page.get("result", {}).get("items", []) or []
+                all_products.extend(items)
+                last_id = page.get("result", {}).get("last_id", "") or ""
+                if not last_id or not items:
+                    break
+        except OzonAPIError as e:
+            await message.answer(
+                f"❌ OZON [{e.status}]: {e.endpoint}\n<code>{e.message[:300]}</code>",
+                parse_mode=ParseMode.HTML,
+            )
+            return
+
+        if not all_products:
+            await message.answer("📭 Товаров не нашлось.")
+            return
+
+        await message.answer(f"📦 Товаров в магазине: <b>{len(all_products)}</b>", parse_mode=ParseMode.HTML)
+
+        # 2. По одному товару: тянем атрибуты, шлём в Claude, показываем превью
+        content = ContentService()
+        processed = 0
+        skipped = 0
+        errors = 0
+
+        for i, prod in enumerate(all_products, 1):
+            if _seo_all_stop:
+                await message.answer(f"⏸ Остановлено. Обработано: {processed}/{len(all_products)}")
+                return
+
+            product_id = prod.get("product_id")
+            if not product_id:
+                skipped += 1
+                continue
+
+            try:
+                attrs_data = await api.get_product_attributes([int(product_id)])
+                items = attrs_data.get("result", []) or []
+                if not items:
+                    skipped += 1
+                    continue
+                item = items[0]
+                offer_id = item.get("offer_id", "")
+                name = item.get("name", "")
+                description = ""
+                for attr in item.get("attributes", []) or []:
+                    if attr.get("attribute_id") == ATTR_DESCRIPTION:
+                        values = attr.get("values", []) or []
+                        if values:
+                            description = values[0].get("value", "")
+                            break
+
+                if not name:
+                    skipped += 1
+                    continue
+
+                # Прогресс-индикатор каждые 5 товаров
+                if i % 5 == 1:
+                    await message.answer(
+                        f"⚙️ Обрабатываю {i}/{len(all_products)} (ок: {processed}, пропуск: {skipped}, ошибок: {errors})"
+                    )
+
+                result = await content.improve_product_card(
+                    current_name=name,
+                    current_description=description,
+                    offer_id=offer_id,
+                )
+
+                new_name = result.get("name", name).strip()
+                new_desc = result.get("description", description).strip()
+                rationale = result.get("rationale", "").strip()
+
+                await _send_seo_preview(
+                    message,
+                    int(product_id),
+                    offer_id,
+                    name,
+                    description,
+                    new_name,
+                    new_desc,
+                    rationale,
+                )
+                processed += 1
+
+            except OzonAPIError as e:
+                errors += 1
+                log.warning(f"OZON error for product {product_id}: {e}")
+                await message.answer(
+                    f"⚠️ Пропустил <code>{product_id}</code>: OZON [{e.status}] {e.message[:200]}",
+                    parse_mode=ParseMode.HTML,
+                )
+            except ClaudeError as e:
+                errors += 1
+                log.warning(f"Claude error for product {product_id}: {e}")
+                await message.answer(f"⚠️ Пропустил <code>{product_id}</code>: AI {e}", parse_mode=ParseMode.HTML)
+            except Exception as e:
+                errors += 1
+                log.exception(f"Unexpected error for product {product_id}")
+                await message.answer(f"⚠️ Пропустил <code>{product_id}</code>: {e}", parse_mode=ParseMode.HTML)
+
+            await asyncio.sleep(_SEO_ALL_DELAY_SEC)
+
+        await message.answer(
+            f"✅ <b>Пакетный SEO завершён</b>\n"
+            f"Обработано: {processed}\n"
+            f"Пропущено: {skipped}\n"
+            f"Ошибок: {errors}\n\n"
+            f"Просмотри превью выше и применяй нужные кнопкой ✅.",
+            parse_mode=ParseMode.HTML,
+        )
+    finally:
+        _seo_all_active = False
+        _seo_all_stop = False
+
+
+# --------------------------------------------------------------------------- #
+# Отзывы
+# --------------------------------------------------------------------------- #
 
 async def _run_reviews(message: Message) -> None:
     """Необработанные отзывы + AI-предложения ответов."""
@@ -688,8 +939,11 @@ async def _run_reviews(message: Message) -> None:
         )
 
 
+# --------------------------------------------------------------------------- #
+# Сводка за вчера
+# --------------------------------------------------------------------------- #
+
 async def _run_report(message: Message) -> None:
-    """Сводка за вчера: данные → Claude → красивый Markdown."""
     await message.answer("⏳ Собираю данные за вчера и готовлю сводку…")
 
     msk = timezone(timedelta(hours=3))
@@ -761,7 +1015,6 @@ async def _run_report(message: Message) -> None:
         )
         return
 
-    # Markdown V1: *bold*, _italic_, `code`. Если не разберётся — отдаём как есть.
     try:
         await message.answer(analysis, parse_mode=ParseMode.MARKDOWN)
     except Exception:
