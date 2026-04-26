@@ -5,8 +5,6 @@ from aiogram.client.default import DefaultBotProperties
 from config import settings
 from database import init_db
 from handlers import get_main_router
-from handlers.debug_ozon import debug_ozon_router  # Простая отладка
-from handlers.ozon_working import ozon_simple_router  # Рабочий OZON
 from services.reminder_service import setup_scheduler
 from utils import log
 
@@ -28,11 +26,6 @@ async def main():
     
     dp = Dispatcher()
     dp.include_router(get_main_router())
-    
-    # OZON команды
-    dp.include_router(debug_ozon_router)  # /oztest, /ozstatus
-    dp.include_router(ozon_simple_router)  # /ozon_simple
-    log.info("OZON modules loaded")
     
     scheduler = setup_scheduler(bot)
     scheduler.start()
