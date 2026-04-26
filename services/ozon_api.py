@@ -95,6 +95,39 @@ class OzonAPI:
         payload = {"product_id": [str(pid) for pid in product_ids]}
         return await self._post("/v3/product/info/list", payload)
 
+    async def get_product_description(self, product_id: int) -> dict[str, Any]:
+        """Полное описание карточки: название, аннотация, атрибуты."""
+        payload = {"product_id": product_id}
+        return await self._post("/v1/product/info/description", payload)
+
+    async def get_product_attributes(
+        self, product_ids: list[int], limit: int = 100
+    ) -> dict[str, Any]:
+        """Атрибуты товаров — там лежит название и описание."""
+        payload = {
+            "filter": {"product_id": [str(pid) for pid in product_ids], "visibility": "ALL"},
+            "limit": limit,
+            "sort_dir": "ASC",
+        }
+        return await self._post("/v4/product/info/attributes", payload)
+
+    async def update_product_attributes(self, items: list[dict[str, Any]]) -> dict[str, Any]:
+        """
+        Обновить атрибуты товара (название, описание, характеристики).
+
+        items — список словарей вида:
+        {
+            "offer_id": "SKU-123",
+            "attributes": [
+                {"complex_id": 0, "id": 9048, "values": [{"value": "Новое название"}]},
+                {"complex_id": 0, "id": 4191, "values": [{"value": "Новое описание"}]}
+            ]
+        }
+        id 9048 — название, id 4191 — описание (стандартные атрибуты OZON).
+        """
+        payload = {"items": items}
+        return await self._post("/v1/product/attributes/update", payload)
+
     async def get_product_stocks(self, last_id: str = "", limit: int = 100) -> dict[str, Any]:
         """Остатки на складах по товарам."""
         payload = {
