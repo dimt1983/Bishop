@@ -7,7 +7,8 @@ OZON Agent Handler для aiogram
 
 import logging
 import asyncio
-from datetime import datetime
+import requests
+from datetime import datetime, timezone, timedelta
 from aiogram import Router, F
 from aiogram.types import Message, CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup
 from aiogram.filters import Command
@@ -182,3 +183,141 @@ async def send_daily_summary_to_chat(bot, chat_id: str) -> None:
         
     except Exception as e:
         logger.error(f"Ошибка в send_daily_summary_to_chat: {e}")
+
+
+@ozon_router.message(Command("ozon_debug"))
+async def ozon_debug_command(message: Message) -> None:
+    """Диагностика OZON API - проверка данных."""
+    try:
+        await message.reply("🔍 Диагностирую OZON API...")
+        
+        ozon_service = OzonAPIService()
+        
+        # Получаем диапазон дат
+        since, to = ozon_service.get_yesterday_range()
+        
+        debug_info = f"🔍 *Диагностика OZON API*\n\n"
+        debug_info += f"📅 Ищу заказы в диапазоне:\n"
+        debug_info += f"С: `{since}`\n"
+        debug_info += f"До: `{to}`\n\n"
+        
+        # Пробуем разные endpoint'ы
+        endpoints_to_try = [
+            ("v2/posting/fbs/list", "FBS v2"),
+            ("v3/posting/fbs/list", "FBS v3"),
+            ("v2/posting/fbo/list", "FBO v2"),
+            ("v1/posting/fbs/list", "FBS v1")
+        ]
+        
+        for endpoint, description in endpoints_to_try:
+            try:
+                url = f"{ozon_service.base_url}/{endpoint}"
+                payload = {
+                    "dir": "ASC",
+                    "filter": {"since": since, "to": to, "status": ""},
+                    "limit": 10,
+                    "offset": 0,
+                    "with": {"analytics_data": True, "financial_data": True},
+                }
+                
+                response = requests.post(url, headers=ozon_service.headers, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    postings = data.get("result", {}).get("postings", [])
+                    debug_info += f"✅ {description}: {len(postings)} заказов\n"
+                    
+                    if postings:
+                        # Показываем первый заказ
+                        first_order = postings[0]
+                        debug_info += f"   Пример: {first_order.get('posting_number', 'N/A')} - {first_order.get('status', 'N/A')}\n"
+                else:
+                    debug_info += f"❌ {description}: HTTP {response.status_code}\n"
+                    
+            except Exception as e:
+                debug_info += f"❌ {description}: {str(e)[:50]}...\n"
+        
+        # Проверяем заказы за последние 3 дня
+        debug_info += f"\n📊 *Заказы за последние дни:*\n"
+        
+        for days_ago in range(3):
+            try:
+                now = datetime.now(timezone.utc)
+                target_day = now - timedelta(days=days_ago)
+                start = target_day.replace(hour=0, minute=0, second=0, microsecond=0)
+                end = target_day.replace(hour=23, minute=59, second=59, microsecond=0)
+                
+                url = f"{ozon_service.base_url}/v2/posting/fbs/list"
+                payload = {
+                    "dir": "ASC",
+                    "filter": {"since": start.isoformat(), "to": end.isoformat(), "status": ""},
+                    "limit": 100,
+                    "offset": 0
+                }
+                
+                response = requests.post(url, headers=ozon_service.headers, json=payload, timeout=30)
+                
+                if response.status_code == 200:
+                    data = response.json()
+                    count = len(data.get("result", {}).get("postings", []))
+                    day_name = "Сегодня" if days_ago == 0 else f"{days_ago} дня назад"
+                    debug_info += f"• {day_name}: {count} заказов\n"
+                    
+            except Exception as e:
+                debug_info += f"• Ошибка для {days_ago} дня назад: {str(e)}\n"
+        
+        await message.reply(debug_info, parse_mode='Markdown')
+        
+    except Exception as e:
+        await message.reply(f"❌ Ошибка диагностики: {str(e)}")
+
+
+@ozon_router.message(Command("ozon_today"))
+async def ozon_today_command(message: Message) -> None:
+    """Получить заказы за сегодня."""
+    try:
+        await message.reply("🔄 Получаю заказы за сегодня...")
+        
+        ozon_service = OzonAPIService()
+        
+        # Сегодняшний день
+        now = datetime.now(timezone.utc)
+        start = now.replace(hour=0, minute=0, second=0, microsecond=0)
+        end = now
+        
+        url = f"{ozon_service.base_url}/v2/posting/fbs/list"
+        payload = {
+            "dir": "ASC",
+            "filter": {"since": start.isoformat(), "to": end.isoformat(), "status": ""},
+            "limit": 100,
+            "offset": 0,
+            "with": {"analytics_data": True, "financial_data": True},
+        }
+        
+        response = requests.post(url, headers=ozon_service.headers, json=payload, timeout=30)
+        response.raise_for_status()
+        
+        data = response.json()
+        orders = data.get("result", {}).get("postings", [])
+        
+        if not orders:
+            await message.reply("📊 За сегодня заказов пока нет")
+            return
+        
+        metrics = ozon_service.aggregate_metrics(orders)
+        
+        text = f"📊 *Заказы за сегодня:*\n\n"
+        text += f"🛒 Заказов: {metrics['total_orders']}\n"
+        text += f"💰 Выручка: {metrics['total_revenue']:,.2f} ₽\n"
+        text += f"📦 Товаров: {metrics['total_items']}\n"
+        text += f"❌ Отмен: {metrics['cancelled']}\n\n"
+        
+        if metrics['top_5_skus']:
+            text += "*🏆 Топ товары сегодня:*\n"
+            for sku, qty in metrics['top_5_skus'][:3]:
+                text += f"• {sku}: {qty} шт.\n"
+        
+        await message.reply(text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await message.reply(f"❌ Ошибка: {str(e)}")
