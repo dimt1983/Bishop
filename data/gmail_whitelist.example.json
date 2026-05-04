@@ -1,0 +1,17 @@
+{
+  "_comment": "Скопируй этот файл в data/gmail_whitelist.json и редактируй под себя.",
+  "domains": [
+    "sberbank.ru", "tinkoff.ru", "tbank.ru", "alfabank.ru", "mtsbank.ru",
+    "vtb.ru", "raiffeisen.ru", "psbank.ru", "rshb.ru", "open.ru", "rosbank.ru",
+    "gosuslugi.ru", "nalog.ru", "nalog.gov.ru", "pfr.gov.ru", "pochta.ru",
+    "mts.ru", "beeline.ru", "megafon.ru", "tele2.ru", "yota.ru",
+    "yoomoney.ru", "qiwi.com",
+    "accounts.google.com"
+  ],
+  "addresses": [],
+  "categories": {
+    "банки": ["sberbank.ru", "tinkoff.ru", "tbank.ru", "alfabank.ru", "mtsbank.ru", "vtb.ru", "raiffeisen.ru", "psbank.ru"],
+    "госуслуги": ["gosuslugi.ru", "nalog.ru", "nalog.gov.ru"],
+    "связь": ["mts.ru", "beeline.ru", "megafon.ru", "tele2.ru"]
+  }
+}

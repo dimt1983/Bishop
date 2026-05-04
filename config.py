@@ -2,7 +2,13 @@
 import os
 import re
 
+from dotenv import load_dotenv
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# Подгружаем .env в os.environ ДО _parse_owner_id, иначе на сервере (где
+# переменные не инжектятся как на Railway) он увидит пустое значение и
+# затрёт OWNER_TELEGRAM_ID нулём.
+load_dotenv()
 
 
 def _parse_owner_id() -> int:
@@ -35,6 +41,11 @@ class Settings(BaseSettings):
 
     max_reminders_after_deadline: int = 5
     overdue_reminder_interval_hours: int = 3
+
+    # Gmail-ассистент (опционально). Если оба заполнены — Бишоп умеет /inbox / /digest.
+    # App Password Gmail (нужна 2FA): https://support.google.com/accounts/answer/185833
+    gmail_user: str = ""
+    gmail_app_password: str = ""
 
 
 os.environ["OWNER_TELEGRAM_ID"] = str(_parse_owner_id())

@@ -1,18 +1,14 @@
 """BishopRB — внутренний AI-помощник команды RBR."""
 import asyncio
-import os
 
 from aiogram import Bot, Dispatcher
 from aiogram.client.default import DefaultBotProperties
 
-from apscheduler.schedulers.asyncio import AsyncIOScheduler
-from apscheduler.triggers.cron import CronTrigger
-
 from config import settings
 from database import init_db
 from handlers import get_main_router
-from handlers.ozon import send_daily_report
 from services.reminder_service import setup_scheduler
+from services.uptime_service import uptime_worker
 from utils import log
 
 
@@ -34,34 +30,23 @@ async def main():
     dp = Dispatcher()
     dp.include_router(get_main_router())
 
-    # Существующий планировщик напоминаний
-    reminder_scheduler = setup_scheduler(bot)
-    reminder_scheduler.start()
+    scheduler = setup_scheduler(bot)
+    scheduler.start()
     log.info("Reminder scheduler started (runs every 15 minutes)")
 
-    # Планировщик OZON: утренняя сводка в 9:00 МСК (= 6:00 UTC)
-    ozon_chat_id = os.getenv("OZON_DAILY_CHAT_ID")
-    ozon_scheduler = AsyncIOScheduler(timezone="UTC")
-    if ozon_chat_id:
-        ozon_scheduler.add_job(
-            send_daily_report,
-            CronTrigger(hour=6, minute=0),  # 09:00 МСК
-            args=[bot, ozon_chat_id],
-            id="ozon_daily_report",
-            replace_existing=True,
-        )
-        ozon_scheduler.start()
-        log.info(f"OZON daily report scheduled for chat {ozon_chat_id} at 09:00 MSK")
-    else:
-        log.warning("OZON_DAILY_CHAT_ID is not set — daily report disabled")
+    uptime_task = asyncio.create_task(uptime_worker(bot, tick_seconds=60))
+    log.info("Uptime worker started (tick=60s)")
 
     try:
         await bot.delete_webhook(drop_pending_updates=True)
         await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
     finally:
-        reminder_scheduler.shutdown()
-        if ozon_scheduler.running:
-            ozon_scheduler.shutdown()
+        scheduler.shutdown()
+        uptime_task.cancel()
+        try:
+            await uptime_task
+        except asyncio.CancelledError:
+            pass
         await bot.session.close()
 
 

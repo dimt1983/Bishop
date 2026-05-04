@@ -129,6 +129,29 @@ class PendingTaskClarification(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class UptimeMonitor(Base):
+    """Простой uptime-мониторинг для пингов URL-ов."""
+    __tablename__ = "uptime_monitors"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    name: Mapped[str] = mapped_column(String(120))
+    url: Mapped[str] = mapped_column(String(500))
+    expected_status: Mapped[int] = mapped_column(Integer, default=200)
+
+    # Текущее состояние
+    is_up: Mapped[Optional[bool]] = mapped_column(Boolean, nullable=True, default=None)
+    last_status: Mapped[Optional[int]] = mapped_column(Integer, nullable=True)
+    last_error: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
+    last_check_at: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+    down_since: Mapped[Optional[datetime]] = mapped_column(DateTime, nullable=True)
+
+    # Кому слать алерты в Telegram (chat_id)
+    alert_chat_id: Mapped[int] = mapped_column(BigInteger)
+    interval_seconds: Mapped[int] = mapped_column(Integer, default=300)
+    is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 engine = create_async_engine(settings.database_url, echo=False)
 async_session_maker = async_sessionmaker(engine, expire_on_commit=False)
 

@@ -3,7 +3,7 @@ from datetime import datetime
 from zoneinfo import ZoneInfo
 
 from aiogram import Bot, F, Router
-from aiogram.types import Message
+from aiogram.types import FSInputFile, Message
 from sqlalchemy import select
 
 from config import settings
@@ -131,8 +131,18 @@ async def _strip_mention(text: str, bot_username: str) -> str:
 
 @router.message(F.chat.type.in_({"group", "supergroup"}) & (F.text | F.caption))
 async def handle_mention(message: Message, bot: Bot):
-    """Главный хэндлер для @bishoprb в чатах (включая форумы с темами)."""
+    """Главный хэндлер для @bishoprb в чатах (включая форумы с темами).
+
+    Если упоминания нет, но сообщение похоже на «сильный» прайс-запрос
+    (явный вопрос про цену/наличие/прайс) — Bishop отвечает сам.
+    """
     if not await _is_mentioned(message, bot):
+        # Авто-ответ без упоминания: только на чёткие вопросы про прайс.
+        if message.from_user and not message.from_user.is_bot:
+            text = (message.text or message.caption or "")
+            if text and _looks_like_strong_price_query(text):
+                await _log_message_if_needed(message)
+                await _handle_price_query(message, text)
         return
 
     # ВАЖНО: логируем сообщение с упоминанием, чтобы автор попал в БД
@@ -157,6 +167,10 @@ async def handle_mention(message: Message, bot: Bot):
 
     if lower.startswith(("отмени", "отменить", "убери задачу")):
         await _handle_cancel_task(message, cleaned)
+        return
+
+    if _looks_like_price_query(lower):
+        await _handle_price_query(message, cleaned)
         return
 
     looks_like_task = any(
@@ -340,6 +354,78 @@ async def _handle_cancel_task(message: Message, text: str):
             f"У вас несколько открытых задач. Уточните:\n\n{list_text}\n\n"
             f"Напишите: @bishoprb отмени #<номер>",
         )
+
+
+_PRICE_TRIGGERS = (
+    "прайс", "прайсе", "прайсу", "цен", "сколько стоит", "сколько будет",
+    "стоимость", "есть ли в наличии", "есть ли у нас", "что в наличии",
+    "позиц", "сорт", "какие сорта", "какой кофе", "что у нас есть",
+    # КП по аренде
+    "аренд", "коммерческое предложение", "nimbus", "нимбус", "wpm",
+)
+
+# «Сильные» триггеры — Bishop реагирует БЕЗ упоминания.
+# Намеренно строже, чтобы не лезть в каждый разговор про задачи.
+_STRONG_PRICE_TRIGGERS = (
+    "сколько стоит", "сколько стоят", "какая цена", "какие цены",
+    "пришли прайс", "пришлите прайс", "скиньте прайс", "скинь прайс",
+    "вышли прайс", "вышлите прайс", "отправь прайс", "отправьте прайс",
+    "пришли каталог", "скинь каталог", "вышли каталог",
+    "цена на", "цены на", "почем", "по чем",
+    "есть ли в наличии", "что есть в наличии",
+    "какой прайс", "какой у нас прайс", "что в прайсе", "что у нас в прайсе",
+    # КП по аренде
+    "пришли кп", "скинь кп", "вышли кп", "пришлите кп",
+    "пришли коммерческое", "скинь коммерческое",
+    "аренда кофемашин", "аренда оборудовани", "арендовать кофемашин",
+    "предложение по аренде", "кп по аренде", "кп аренда",
+)
+
+
+def _looks_like_price_query(text_lower: str) -> bool:
+    return any(kw in text_lower for kw in _PRICE_TRIGGERS)
+
+
+def _looks_like_strong_price_query(text: str) -> bool:
+    """Жёсткий триггер — реагируем без упоминания только на явные вопросы."""
+    t = text.lower().strip()
+    if len(t) > 400:
+        # Длинные тексты — обычно не клиентские вопросы про прайс
+        return False
+    return any(kw in t for kw in _STRONG_PRICE_TRIGGERS)
+
+
+async def _handle_price_query(message: Message, query: str):
+    """Прайс-запрос в чате. Owner получает полный доступ, остальные — readonly."""
+    is_owner = message.from_user.id == settings.owner_telegram_id
+    try:
+        answer, files = await claude_service.price_chat(
+            query,
+            message.from_user.id,
+            is_owner=is_owner,
+            keep_history=False,
+        )
+    except Exception as e:
+        log.error(f"price_chat (mention) failed: {e}")
+        answer, files = f"Не смог открыть прайс: {e}", []
+
+    thread_id = getattr(message, "message_thread_id", None)
+    for f in files:
+        try:
+            await message.bot.send_document(
+                chat_id=message.chat.id,
+                document=FSInputFile(f["path"], filename=f.get("filename")),
+                caption=f.get("caption") or None,
+                message_thread_id=thread_id,
+            )
+        except Exception as e:
+            log.error(f"send_document (mention) failed: {e}")
+            await _reply_in_topic(message, f"Не смог отправить файл: {e}")
+
+    if answer:
+        chunk = 4000
+        for i in range(0, len(answer), chunk):
+            await _reply_in_topic(message, answer[i:i + chunk])
 
 
 async def _handle_search(message: Message, query: str):
