@@ -119,7 +119,20 @@ async def price_chat(
     history.append({"role": "user", "content": message_text})
     _PRICE_LAST_ACTIVE[user_id] = _now()
 
-    final_text, files = await _run_price_loop(history, tools, system, user_id)
+    try:
+        final_text, files = await _run_price_loop(history, tools, system, user_id)
+    except Exception as e:
+        # Автовосстановление: осиротевший tool_use после крэша экзекьютора
+        msg = str(e)
+        if "tool_use" in msg and "tool_result" in msg:
+            log.warning(f"price_chat: corrupt history for {user_id}, resetting and retrying")
+            reset_price_history(user_id)
+            history = _PRICE_HISTORY.setdefault(user_id, [])
+            history.append({"role": "user", "content": message_text})
+            _PRICE_LAST_ACTIVE[user_id] = _now()
+            final_text, files = await _run_price_loop(history, tools, system, user_id)
+        else:
+            raise
 
     if len(history) > _PRICE_HISTORY_MAX * 2:
         del history[: len(history) - _PRICE_HISTORY_MAX * 2]
@@ -151,6 +164,10 @@ async def _run_price_loop(
             )
         except Exception as e:
             log.error(f"price loop Anthropic call failed: {e}")
+            msg = str(e)
+            if "tool_use" in msg and "tool_result" in msg:
+                # осиротевший tool_use в истории — пробрасываем наверх для recovery
+                raise
             if history and history[-1].get("role") == "user":
                 history.pop()
             return f"Не смог достучаться до Claude: {e}", []
@@ -258,12 +275,32 @@ SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по упра
 3. ПОСЛЕ ПРАВОК — ОБЯЗАТЕЛЬНО ВЫЗОВИ shop_publish ОДИН РАЗ В КОНЦЕ СЕССИИ. Это пушит в GitHub и Railway передеплоит магазин через 2 минуты. Не вызывай его на каждое мелкое изменение — копи и публикуй пакетом.
 4. ФОТО. Если пользователь говорит «вот фото / прислал фото / это фото товара» — он отправил картинку в сообщении. Используй shop_set_photo_from_telegram (фото лежит в pending state).
 5. ОТПРАВКА ФОТО. Если просят «скинь/покажи/пришли фото товара» — вызывай shop_send_photo, фото отправится отдельным сообщением. Этот тул также полезен после shop_set_photo_*, чтобы убедиться что фото действительно прицепилось.
-6. СВЯЗКА С ПРАЙСОМ. Если в этом же диалоге пользователь добавлял позицию в прайс через price_add (моносорт/микролот/смесь) — предложи добавить её и в магазин через shop_add_product. Бери цены 1кг и 200г из результата price_calculate / price_add. category="coffee", subcategory подбирается:
-   - моносорт → "monosorta"
-   - микролот Black Edition → "mikroloty_black_edition"
-   - микролот Борщ Edition → "mikroloty_borshh_edition"
-   - смесь/blend → "smesi"
-7. КАТЕГОРИИ TMA: coffee/tea/syrup/milk. Подкатегории смотри через shop_list_subcategories.
+6. КАТАЛОГ КОФЕ В МАГАЗИНЕ (КРИТИЧНО — НЕ ПУТАТЬ КАТЕГОРИИ И ФАСОВКИ).
+
+   Структура подкатегорий кофе в TMA:
+   — ☕ **Эспрессо** — фасовка ТОЛЬКО 1 кг. Подкатегории: `coffee_espresso_mono` (моносорт), `coffee_espresso_microlot` (микролот), `coffee_espresso_blend` (смесь).
+   — 💧 **Фильтр** — фасовка ТОЛЬКО 1 кг. Подкатегории: `coffee_filter_mono`, `coffee_filter_microlot`, `coffee_filter_blend`.
+   — 🖤 **Блэк** (`coffee_black`) — фасовка ТОЛЬКО 200 г, плоский список. Сюда идут классические/мытые обработки.
+   — 🍅 **Борщ** (`coffee_borshch`) — фасовка ТОЛЬКО 200 г, плоский список. Сюда идут эксперименты: натуральная, анаэробная, хани, инфьюз.
+   — 💊 Дрипы/Капсулы (`coffee_drip_capsules`) — отдельный плоский раздел.
+   — 📦 Прочее (`coffee_other`).
+
+   ПРАВИЛО ДВУХ КАРТОЧЕК для кофейных позиций (моносорт / микролот / смесь):
+   Каждая позиция должна попасть в магазин ДВУМЯ отдельными карточками:
+     1. **1 кг** — в Эспрессо или Фильтр (соответствующая подкатегория `*_mono` / `*_microlot` / `*_blend`).
+     2. **200 г** — в Блэк или Борщ (зависит от обработки/назначения).
+   Если делается только одна — это ошибка по умолчанию, исправь.
+
+   ЦЕНЫ: 1кг карточка → берёт базовую цену 1кг из price_calculate/price_add; 200г карточка → базовую 200г.
+
+   ЕСЛИ ИНФОРМАЦИИ НЕ ХВАТАЕТ — СПРАШИВАЙ, НЕ ДОДУМЫВАЙ:
+     • «1 кг — в Эспрессо или Фильтр?»
+     • «200 г — в Блэк или Борщ?»
+   Эвристика для подсказки (но финал — за Дмитрием): мытые/классика → Блэк; натуральная/анаэроб/хани/инфьюз → Борщ.
+
+   СВЯЗКА С ПРАЙСОМ: если в этом же диалоге Дмитрий добавлял позицию через price_add — после подтверждения сразу делай shop_add_product дважды (1кг + 200г), уточнив куда именно. Не оставляй позицию только в одной фасовке.
+
+7. КАТЕГОРИИ TMA: coffee / tea / syrup / milk / consulting. Подкатегории кофе — см. п.6. Для остальных смотри shop_list_subcategories.
 8. ОБЩИЙ АССОРТИМЕНТ. Если просят «прайс на сиропы / молоко / чай Althaus / Niktea» или «есть ли у нас X» из НЕ-кофейного — это вопрос к assortment_show / assortment_search (реестр всех 348 позиций с ценой поступления и базовой). Это НЕ магазин TMA. Если просят «прикинь цену для нового сиропа BARLINE при поступлении 380» — assortment_calculate (медианный коэф наценки бренда). Коэф ≈ 1.50 для BARLINE / 1.45 для BOTANIKA / 1.10 для Herbarista / 1.60 для Китайский / 1.50 для Чай листовой и т.д.
 9. ОТПРАВКА ПРАЙСОВ И КАТАЛОГОВ:
    — «пришли прайс на чай / сиропы / молоко / прочее» → assortment_send_pricelist (category: tea/syrups/other). PDF по умолчанию, xlsx если просят «эксель».
@@ -415,6 +452,11 @@ async def _run_shop_loop(
             )
         except Exception as e:
             log.error(f"shop loop Anthropic call failed: {e}")
+            msg = str(e)
+            if "tool_use" in msg and "tool_result" in msg:
+                # осиротевший tool_use в истории — пробрасываем,
+                # чтобы внешний shop_chat сбросил историю и сделал retry
+                raise
             if history and history[-1].get("role") == "user":
                 history.pop()
             return f"Не смог достучаться до Claude: {e}", []
