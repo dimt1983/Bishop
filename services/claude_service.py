@@ -17,6 +17,7 @@ import services.students_tools as students_tools
 import services.gmail_chat_tools as gmail_chat_tools
 import services.finance_tools as finance_tools
 import services.ozon_seller_tools as ozon_seller_tools
+import services.mg_bonus_tools as mg_bonus_tools
 import services.service_tools as service_tools
 from utils import log
 
@@ -58,6 +59,7 @@ price_send_file шлёт файл в Telegram. Доступные: kind=price (�
 Если просят «пришли КП по аренде / коммерческое предложение / предложение по аренде / аренда кофемашины / NIMBUS / WPM» — вызывай price_send_file kind=rental. После отправки можно коротко предложить созвониться для обсуждения условий.
 
 Жёсткие правила:
+0. 🚨 НИКОГДА НЕ ВЫДУМЫВАЙ КОЭФФИЦИЕНТЫ. Все цены (1кг, 200г, опт от 10/25 кг, СТМ) считаются ТОЛЬКО через price_calculate — он применяет официальную формулу price_manager (там зафиксированы CEH_MIN, NAZENKA, SKIDKA_10KG/25KG, DOP_200G_*). НЕ пиши «200г = 1кг × 0.307», «опт = базовый × 0.9» и подобное. Если price_calculate не показал нужное число — у тебя нет данных, спроси Дмитрия. Расхождение твоих цен с прайсом = твоя галлюцинация (был кейс: посчитал 200г Колумбий по 0.307 → 875/1485/1820, реальная формула даёт 650/1050/1265 → 12 расхождений в магазине).
 1. Если пользователь просит «посчитай», «прикинь», «сколько будет» — вызывай price_calculate (БЕЗ записи).
 2. Если пользователь сразу пишет «добавь» — НЕ вызывай price_add сразу. Сначала вызови price_calculate, покажи краткую таблицу цен и спроси «Добавлять в реестр?». Зови price_add только после явного «да/добавляй/ок/верно/гуд».
 3. Если в сообщении нет типа позиции (моносорт / микролот / blend Es / blend F) — спроси.
@@ -278,10 +280,21 @@ SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по упра
   Формат месяца: 'YYYY-MM' (например '2026-04'), 'last' (прошлый месяц), 'current' (текущий).
   Источник — папка 'Roastberry/Озон отчет' на Я.Диске; Ozon выкладывает документы в начале месяца за прошлый.
   По умолчанию когда просят отчёт — вызывай ozon_full_monthly_report. ЗАПРОС «скинь отчёт по Озону за апрель» = ozon_full_monthly_report(month='2026-04'). НЕ говори «у меня нет доступа к маркетплейсам» — у тебя ЕСТЬ эти инструменты.
+— БОНУС MONKEY GRINDER (только для владельца):
+  • mg_bonus_calculate(month) — посчитать ежемесячный бонус сети MG. Скачивает выгрузку 1С из 'Roastberry/MG' на Я.Диске, перемножает количества по торговым точкам на фиксированные ставки за единицу (51.23 ₽ за 200г Сертао, 154.43 ₽ за 1кг Серрадо Дарк, 226.09 ₽ за 1кг Сертао Filter) и формирует Excel «Расчет премии <месяц> <гг>.xlsx» — файл прикрепится сам. Используй когда Дмитрий говорит «посчитай MG / премия Манки Гриндер / бонус MG за <месяц>».
+  • mg_bonus_summary(month) — текстовая сводка без файла.
+  • mg_bonus_check_pending() — проверить лежит ли отчёт за прошлый месяц (используется планировщиком).
+  Формат месяца: 'YYYY-MM' либо 'last' (прошлый), 'current' (текущий), либо «апрель», «март 2026».
+  Источник — папка 'Roastberry/MG' на Я.Диске. Отчёт туда заливается 1-го числа каждого месяца за прошлый. Бишеп САМ запускает расчёт 1-го числа в 11:00, если файл не пришёл — пишет владельцу что нужно закинуть руками.
 — ЛИЧНЫЕ ФИНАНСЫ (только для владельца): finance_balance (остатки по счетам), finance_recent (последние транзакции), finance_summary (сводка доходы/расходы по категориям за период), finance_recurring_due (предстоящие регулярные платежи), finance_cashflow_forecast (прогноз кэшфлоу с понедельной развёрткой и точкой возможной 'дыры'), finance_add_expense / finance_add_income (добавить транзакцию вручную), finance_accounts_list, finance_categories_list. Это ЛИЧНЫЕ финансы Дмитрия (банковские карты, кредиты, ипотека) — НЕ финансы Roastberry. Все запросы по умолчанию исключают бизнес-категории. Если Дмитрий спрашивает «сколько у меня денег», «сколько потратил в этом месяце», «когда платёж по ипотеке», «хватит ли мне до конца месяца», «прогноз на 2 месяца» — это сюда. Если говорит «потратил 500 на кофе» / «купил продукты на 3500 со Сбера» — finance_add_expense (сначала вызови finance_accounts_list если непонятно с какого счёта, спроси если несколько вариантов).
 
 Принципы работы:
 
+0. 🚨 НИКОГДА НЕ ВЫДУМЫВАЙ КОЭФФИЦИЕНТЫ ДЛЯ ЦЕН. Все цены кофе считай через price_calculate (формула из price_manager). Не пиши «200г = 1кг × 0.307», «опт = базовый × 0.9». Если в price_add итог отличается от того что в твоей голове — твоя голова ошибается, итог правильный.
+0.1 МЕСТО ПРАВКИ ЦЕНЫ КОФЕ. Цены кофе в TMA при каждом запросе перетираются из xlsx-прайса (live_prices_api в TG-BOT). Поэтому:
+   — постоянное изменение цены кофейной позиции = меняй прайс через price_remove + price_add (или поправь черновик и file_run("price_export")), НЕ shop_update_field. shop_publish после этого скопирует свежий xlsx в TG-BOT, цены подтянутся в TMA сами.
+   — shop_update_field(field=price) для кофе имеет смысл только в редких случаях: позиции отсутствующей в xlsx (консалтинг, спецкарточка) или временной акции. После такой правки сразу скажи Дмитрию что перетрётся при следующем live-merge — пусть знает.
+   — для НЕ-кофе (чай, сиропы, молоко, консалтинг) live_prices не работает — там shop_update_field price полностью валиден.
 1. ПОИСК ПЕРЕД ДЕЙСТВИЕМ. Если нужен tma_id товара и оно не дано явно — сначала вызывай shop_search.
 2. ИЗМЕНЕНИЯ ТОЛЬКО ПОСЛЕ ПОДТВЕРЖДЕНИЯ. Если пользователь пишет «обнови цену», «обнови описание», «добавь товар» — сначала покажи что собираешься менять и спроси «подтвердить?». Действуй после «да/ок/верно».
 3. ПОСЛЕ ПРАВОК — ОБЯЗАТЕЛЬНО ВЫЗОВИ shop_publish ОДИН РАЗ В КОНЦЕ СЕССИИ. Это пушит в GitHub и Railway передеплоит магазин через 2 минуты. Не вызывай его на каждое мелкое изменение — копи и публикуй пакетом.
@@ -447,6 +460,7 @@ async def shop_chat(
             + list(gmail_chat_tools.TOOLS_OWNER)
             + list(finance_tools.TOOLS_OWNER)
             + list(ozon_seller_tools.TOOLS_OWNER)
+            + list(mg_bonus_tools.TOOLS_OWNER)
             + list(service_tools.TOOLS_OWNER)
         )
         system = SHOP_SYSTEM_PROMPT_OWNER
@@ -596,6 +610,16 @@ async def _run_shop_loop(
                         result = await asyncio.to_thread(
                             ozon_seller_tools.execute_tool, tu.name, tu.input
                         )
+                    elif tu.name.startswith("mg_bonus_"):
+                        # Бонус Monkey Grinder — только владелец.
+                        if log_user_id != settings.owner_telegram_id:
+                            result = json.dumps({"status": "error",
+                                                 "error": "mg_bonus tools только для владельца"},
+                                                ensure_ascii=False)
+                        else:
+                            result = await asyncio.to_thread(
+                                mg_bonus_tools.execute_tool, tu.name, tu.input
+                            )
                     elif tu.name.startswith("service_"):
                         # Сервисная служба — только владелец (выдача кодов и т.п.)
                         if log_user_id != settings.owner_telegram_id:
@@ -627,7 +651,8 @@ async def _run_shop_loop(
                 # private.py отправит как document для PDF/XLSX и как photo для остального.
                 if tu.name in ("shop_send_photo", "assortment_send_catalog",
                                "assortment_send_pricelist", "price_send_file",
-                               "ozon_monthly_report", "ozon_full_monthly_report"):
+                               "ozon_monthly_report", "ozon_full_monthly_report",
+                               "mg_bonus_calculate"):
                     try:
                         parsed = json.loads(result)
                         if parsed.get("status") == "ready":

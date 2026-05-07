@@ -66,9 +66,11 @@ _TOOL_UPDATE_FIELD = {
     "description": (
         "Обновить поле товара: price / description / stock / tags / name / "
         "country / roast / process / recipe_e / recipe_f. "
-        "Для price указывай fasovka_size (\"200 г\" / \"1 кг\" / ...) и new_price — "
-        "карточка автоматически помечается _price_locked=true, чтобы live-merge "
-        "из xlsx-прайса её не перетирал. "
+        "Для price указывай fasovka_size (\"200 г\" / \"1 кг\" / ...) и new_price. "
+        "ВНИМАНИЕ: цены кофе в TMA перетираются из xlsx-прайса при каждом запросе. "
+        "Для постоянных изменений цены кофе — правь прайс через price_add/price_remove, "
+        "не магазин. shop_update_field price имеет смысл только для позиций которых "
+        "нет в xlsx-прайсе (консалтинг, спецкарточки) или для разовых акций. "
         "Для description / name / country / roast / process / recipe_e / recipe_f — "
         "value (string). recipe_e и recipe_f — рецепты приготовления для эспрессо "
         "и фильтра соответственно. "
@@ -296,12 +298,9 @@ def shop_update_field(tma_id: str, field: str, value=None,
                                  available=[f["size"] for f in p.get("fasovka", [])])
         old = fa["price"]
         fa["price"] = float(new_price)
-        # Помечаем карточку как ручную цену — иначе live_prices_api в TG-BOT
-        # перетрёт обратно по fuzzy-матчу из xlsx-прайса.
-        p["_price_locked"] = True
         _save(data)
         return _to_dict_resp(True,
-                             msg=f"Цена {fasovka_size} обновлена: {old} → {new_price} (locked)")
+                             msg=f"Цена {fasovka_size} обновлена: {old} → {new_price}")
     if field == "stock":
         try:
             v = int(value)
