@@ -27,6 +27,10 @@ TMA_STATIC = Path("/root/projects/ai-agents-rb/BOT_TG/tma_static")
 PRODUCTS_JSON = TMA_STATIC / "products.json"
 PHOTOS_DIR = TMA_STATIC / "photos" / "products"
 GIT_REPO = Path("/tmp/TG-BOT")
+# Источник прайса для live-merge в TMA (live_prices_api читает его из tma_static/data/).
+# Без актуального xlsx fuzzy-матчер скидывает новые позиции на старые с неверными ценами.
+BISHOP_PRICE_XLSX_SRC = Path("/root/projects/ai-agents-rb/Прайсы/чистовики/Roastberry_Прайс_2026.xlsx")
+BISHOP_PRICE_XLSX_DST_REL = "tma_static/data/Roastberry_Прайс_2026.xlsx"
 
 
 # ─── Tool definitions ───────────────────────────────────────────────────────
@@ -40,7 +44,7 @@ _TOOL_SEARCH = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Часть названия или категории. Пусто = все"},
-            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk",""], "description": "Опц. фильтр по категории"},
+            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk","consulting",""], "description": "Опц. фильтр по категории"},
             "limit": {"type": "integer", "description": "Макс. результатов", "default": 15},
         },
     },
@@ -108,7 +112,7 @@ _TOOL_ADD = {
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk"]},
+            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk","consulting"]},
             "subcategory": {"type": "string", "description": "ID подкатегории (например 'tea_althaus_loose')"},
             "fasovka": {
                 "type": "array",
@@ -442,10 +446,18 @@ def shop_publish(comment: str = "Bishop: shop update") -> str:
             str(GIT_REPO / "tma_static" / "photos" / "products" / ""),
             shell=True, check=False,
         )
+        # Свежий xlsx-прайс — live_prices_api в TG-BOT читает именно его и
+        # перетирает цены кофейных карточек. Без обновления fuzzy-матч уведёт
+        # новые позиции на похожие старые.
+        if BISHOP_PRICE_XLSX_SRC.exists():
+            xlsx_dst = GIT_REPO / BISHOP_PRICE_XLSX_DST_REL
+            xlsx_dst.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["cp", str(BISHOP_PRICE_XLSX_SRC), str(xlsx_dst)], check=True)
 
         # 2. add + commit + push
         subprocess.run(git + ["add", "tma_static/products.json",
-                              "tma_static/photos/products/"], check=True, env=env)
+                              "tma_static/photos/products/",
+                              BISHOP_PRICE_XLSX_DST_REL], check=True, env=env)
         result = subprocess.run(git + ["status", "--short"],
                                 check=True, capture_output=True, text=True, env=env)
         if not result.stdout.strip():
