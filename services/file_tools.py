@@ -111,7 +111,9 @@ _TOOL_RUN = {
         "'price_export' (price_manager.py export — пересобирает прайс/каталог/СТМ/дашборд), "
         "'rental_pdf' (rental_offer.py — пересобирает КП по аренде), "
         "'tea_catalog' (tea_catalog.py — каталог чая), "
-        "'assortment_export' (assortment_manager.py export — прайсы чай/сиропы/прочее). "
+        "'assortment_export' (assortment_manager.py export — прайсы чай/сиропы/прочее), "
+        "'stocks_sync' (sync_prices_stocks.py — синкнуть остатки + базовые цены "
+        "из 'Прайс и остатки.xlsx' в TMA-каталог). "
         "Используй после file_edit чтобы изменения попали в чистовики."
     ),
     "input_schema": {
@@ -119,7 +121,7 @@ _TOOL_RUN = {
         "properties": {
             "task": {
                 "type": "string",
-                "enum": ["price_export", "rental_pdf", "tea_catalog", "assortment_export"],
+                "enum": ["price_export", "rental_pdf", "tea_catalog", "assortment_export", "stocks_sync"],
             },
         },
         "required": ["task"],
@@ -207,9 +209,39 @@ _TOOL_PDF_EXTRACT = {
     },
 }
 
+_TOOL_XLSX_READ = {
+    "name": "xlsx_read",
+    "description": (
+        "Прочитать содержимое .xlsx-файла (Excel). Возвращает список листов, "
+        "имя активного листа и строки в виде массива массивов. Используй когда "
+        "Дмитрий ссылается на Excel-файл — остатки, прайс, выгрузка из 1С или "
+        "файл с Я.Диска. Если файл на Я.Диске — сначала yadisk_fetch, потом "
+        "xlsx_read с локальным путём из workdir/. Поддерживает выбор листа и "
+        "лимит строк."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "path": {
+                "type": "string",
+                "description": "Локальный абсолютный путь к .xlsx (после yadisk_fetch или из проекта).",
+            },
+            "sheet": {
+                "type": "string",
+                "description": "Имя листа или числовой индекс (0-based). По умолчанию — активный лист.",
+            },
+            "max_rows": {
+                "type": "integer",
+                "description": "Максимум строк в ответе. По умолчанию 200, максимум 5000. Если строк больше — truncated=true.",
+            },
+        },
+        "required": ["path"],
+    },
+}
+
 TOOLS_OWNER = [
     _TOOL_LIST, _TOOL_READ, _TOOL_EDIT, _TOOL_WRITE, _TOOL_RUN,
-    _TOOL_YADISK_LIST, _TOOL_YADISK_FETCH, _TOOL_PDF_EXTRACT,
+    _TOOL_YADISK_LIST, _TOOL_YADISK_FETCH, _TOOL_PDF_EXTRACT, _TOOL_XLSX_READ,
 ]
 TOOLS_READONLY: list[dict] = []  # Не даём не-владельцам никакого file-доступа.
 
@@ -408,6 +440,11 @@ _RUN_TASKS = {
         "cwd": "/root/projects/ai-agents-rb/Прайсы",
         "args": ["python3", "assortment_manager.py", "export"],
         "label": "Пересборка прайсов ассортимента",
+    },
+    "stocks_sync": {
+        "cwd": "/root/projects/ai-agents-rb/BOT_TG",
+        "args": ["python3", "sync_prices_stocks.py"],
+        "label": "Синк остатков и базовых цен из 'Прайс и остатки.xlsx' в TMA",
     },
 }
 
@@ -651,6 +688,97 @@ def _t_pdf_extract(inp: dict) -> str:
     }, ensure_ascii=False)
 
 
+def _t_xlsx_read(inp: dict) -> str:
+    path_str = inp.get("path") or ""
+    if not path_str:
+        return json.dumps({"status": "error", "error": "path не задан"},
+                          ensure_ascii=False)
+    p = Path(path_str)
+    if not p.is_absolute():
+        return json.dumps({"status": "error", "error": "путь должен быть абсолютным"},
+                          ensure_ascii=False)
+    target = p.resolve() if p.exists() else (p.parent.resolve() / p.name)
+    valid = (
+        any(_is_under(target, root) for root in ALLOWED_ROOTS)
+        or _is_under(target, YADISK_WORKDIR.resolve())
+    )
+    if not valid:
+        return json.dumps({"status": "error",
+                           "error": f"путь вне разрешённых корней: {target}"},
+                          ensure_ascii=False)
+    if not p.is_file():
+        return json.dumps({"status": "error", "error": f"не найден: {p}"},
+                          ensure_ascii=False)
+
+    max_rows = int(inp.get("max_rows") or 200)
+    max_rows = max(1, min(max_rows, 5000))
+    sheet_arg = inp.get("sheet")
+
+    try:
+        import openpyxl
+    except ImportError:
+        return json.dumps({"status": "error",
+                           "error": "openpyxl не установлен"},
+                          ensure_ascii=False)
+
+    try:
+        wb = openpyxl.load_workbook(str(p), data_only=True, read_only=True)
+    except Exception as e:
+        return json.dumps({"status": "error",
+                           "error": f"не удалось открыть xlsx: {e}"},
+                          ensure_ascii=False)
+
+    try:
+        sheets = list(wb.sheetnames)
+        if sheet_arg is not None and sheet_arg != "":
+            if sheet_arg in sheets:
+                ws = wb[sheet_arg]
+                active = sheet_arg
+            else:
+                try:
+                    idx = int(sheet_arg)
+                    if 0 <= idx < len(sheets):
+                        ws = wb[sheets[idx]]
+                        active = sheets[idx]
+                    else:
+                        return json.dumps({"status": "error",
+                                           "error": f"индекс листа вне диапазона: {idx}",
+                                           "sheets": sheets}, ensure_ascii=False)
+                except (TypeError, ValueError):
+                    return json.dumps({"status": "error",
+                                       "error": f"лист '{sheet_arg}' не найден",
+                                       "sheets": sheets}, ensure_ascii=False)
+        else:
+            ws = wb.active
+            active = ws.title
+
+        rows: list[list] = []
+        total = 0
+        for row in ws.iter_rows(values_only=True):
+            total += 1
+            if len(rows) < max_rows:
+                cells = []
+                for v in row:
+                    if hasattr(v, "isoformat"):
+                        cells.append(v.isoformat())
+                    else:
+                        cells.append(v)
+                rows.append(cells)
+
+        return json.dumps({
+            "status": "ok",
+            "path": str(p),
+            "sheets": sheets,
+            "active_sheet": active,
+            "rows_count": total,
+            "rows_returned": len(rows),
+            "truncated": total > max_rows,
+            "rows": rows,
+        }, ensure_ascii=False, default=str)
+    finally:
+        wb.close()
+
+
 # ─── Dispatcher ─────────────────────────────────────────────────────────────
 
 _DISPATCH = {
@@ -662,6 +790,7 @@ _DISPATCH = {
     "yadisk_list": _t_yadisk_list,
     "yadisk_fetch": _t_yadisk_fetch,
     "pdf_extract_pages": _t_pdf_extract,
+    "xlsx_read": _t_xlsx_read,
 }
 
 # Публичный set имён, чтобы внешний диспетчер (claude_service) знал,
