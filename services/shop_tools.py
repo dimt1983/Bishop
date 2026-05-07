@@ -83,7 +83,9 @@ _TOOL_UPDATE_FIELD = {
             "field": {
                 "type": "string",
                 "enum": ["price", "description", "stock", "tags", "name",
-                         "country", "roast", "process", "recipe_e", "recipe_f"],
+                         "country", "roast", "process", "recipe_e", "recipe_f",
+                         "region", "altitude", "variety", "aroma", "taste",
+                         "roast_descr", "roast_date", "batch"],
             },
             "value": {"description": "Новое значение (тип зависит от поля)"},
             "fasovka_size": {"type": "string", "description": "Только для field=price (например '1 кг')"},
@@ -194,6 +196,61 @@ _TOOL_PUBLISH = {
     },
 }
 
+_TOOL_RENDER_PACKS_BULK = {
+    "name": "shop_render_packs_bulk",
+    "description": (
+        "Массово сгенерировать пакеты для всех кофейных карточек в "
+        "указанной подкатегории (например coffee_filter_microlot, "
+        "coffee_espresso_mono) или для всех coffee_espresso_*/coffee_filter_*. "
+        "Возвращает список: что отрендерилось и для каких карточек не "
+        "хватает данных. Не вызывай если Дмитрий не попросил массовую "
+        "заливку — обычно сначала тестируется одна-две через shop_render_pack."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "subcategory": {
+                "type": "string",
+                "description": "Конкретная подкатегория (coffee_filter_microlot и т.д.) "
+                               "или префикс 'coffee_espresso' / 'coffee_filter' / 'coffee'.",
+            },
+            "skip_if_photo": {
+                "type": "boolean",
+                "description": "По умолчанию true — пропускать карточки у которых уже "
+                               "есть photo (не перезаписывать существующие фото).",
+            },
+        },
+        "required": ["subcategory"],
+    },
+}
+
+_TOOL_RENDER_PACK = {
+    "name": "shop_render_pack",
+    "description": (
+        "Сгенерировать фото пакета кофе для карточки магазина — наложить на "
+        "красный (эспрессо) или зелёный (фильтр) шаблон этикетку с данными "
+        "позиции (имя, аромат, вкус, регион, высота, сорт, обработка, дата "
+        "обжарки, партия). Шаблон выбирается автоматически по подкатегории "
+        "(coffee_espresso_* → красный, coffee_filter_* → зелёный). "
+        "Если каких-то полей в карточке нет (region/altitude/variety/aroma/"
+        "taste/roast_descr) — тул вернёт status='needs_input' со списком "
+        "недостающих полей. Тогда: спроси Дмитрия, сохрани полученное через "
+        "shop_update_field, потом вызови shop_render_pack заново. "
+        "Дата обжарки автоматически = сегодняшняя если не задана. Партия по "
+        "умолчанию '1'. Готовое фото сохраняется в "
+        "tma_static/photos/products/<tma_id>.jpg и привязывается к карточке."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tma_id": {"type": "string", "description": "ID карточки в магазине"},
+            "kind": {"type": "string", "enum": ["espresso", "filter"],
+                     "description": "Опционально — переопределить шаблон. По умолчанию выводится из subcategory."},
+        },
+        "required": ["tma_id"],
+    },
+}
+
 _TOOL_CATALOG_LOOKUP = {
     "name": "shop_catalog_lookup",
     "description": (
@@ -219,7 +276,8 @@ _TOOL_CATALOG_LOOKUP = {
 
 TOOLS_OWNER = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_UPDATE_FIELD,
                _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_ADD, _TOOL_REMOVE,
-               _TOOL_SEND_PHOTO, _TOOL_PUBLISH, _TOOL_CATALOG_LOOKUP]
+               _TOOL_SEND_PHOTO, _TOOL_PUBLISH, _TOOL_CATALOG_LOOKUP,
+               _TOOL_RENDER_PACK, _TOOL_RENDER_PACKS_BULK]
 TOOLS_READONLY = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_SEND_PHOTO,
                   _TOOL_CATALOG_LOOKUP]
 
@@ -317,7 +375,9 @@ def shop_update_field(tma_id: str, field: str, value=None,
         return _to_dict_resp(True, msg=f"Теги: {p['tags']}")
     # текстовые поля
     if field in ("name", "description", "country", "roast", "process",
-                 "recipe_e", "recipe_f"):
+                 "recipe_e", "recipe_f",
+                 "region", "altitude", "variety", "aroma", "taste",
+                 "roast_descr", "roast_date", "batch"):
         p[field] = str(value or "")
         _save(data)
         return _to_dict_resp(True, msg=f"Поле {field} обновлено")
@@ -610,6 +670,125 @@ def shop_catalog_lookup(name: str, min_score: float = 0.5) -> str:
                          hits=hits[:3])
 
 
+# ── Рендер пакета (этикетка на красном/зелёном шаблоне) ──
+
+import services.pack_renderer as pack_renderer  # noqa: E402
+
+
+def shop_render_pack(tma_id: str, kind: str | None = None) -> str:
+    data = _load()
+    p = next((x for x in data["products"] if x["id"] == tma_id), None)
+    if not p:
+        return _to_dict_resp(False, error=f"Товар не найден: {tma_id}")
+
+    # Тип шаблона
+    if not kind:
+        kind = pack_renderer.kind_from_subcategory(p.get("subcategory", ""))
+    if kind not in ("espresso", "filter"):
+        return _to_dict_resp(False,
+                             error=("Шаблон не определён. Карточка должна быть в "
+                                    "coffee_espresso_* или coffee_filter_*. Для 200г "
+                                    "(coffee_black/coffee_borshch) шаблон пока не готов."),
+                             subcategory=p.get("subcategory"))
+
+    # Проверка обязательных полей
+    missing = pack_renderer.find_missing(p)
+    if missing:
+        return _to_dict_resp(
+            False,
+            status="needs_input",
+            missing=missing,
+            error=f"Не хватает полей карточки: {', '.join(missing)}. "
+                  f"Спроси у Дмитрия и сохрани через shop_update_field, "
+                  f"потом вызови shop_render_pack заново.",
+            have={k: p.get(k) for k in pack_renderer.LABEL_FIELDS if p.get(k)},
+        )
+
+    # Дата обжарки: если нет — подставляем сегодня и СОХРАНЯЕМ в карточку,
+    # чтобы при следующих рендерах она не «двигалась».
+    if not p.get("roast_date"):
+        from datetime import date
+        p["roast_date"] = date.today().strftime("%d.%m.%Y")
+    if not p.get("batch"):
+        p["batch"] = "1"
+    _save(data)
+
+    # Готовим данные и рендерим
+    label_data = pack_renderer.build_label_data(p)
+    PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = PHOTOS_DIR / f"{tma_id}.jpg"
+    try:
+        pack_renderer.render(kind, label_data, out_path)
+    except Exception as e:
+        return _to_dict_resp(False, error=f"Ошибка рендера: {type(e).__name__}: {e}")
+
+    # Привязываем фото к карточке (как делают shop_set_photo_*)
+    p["photo"] = f"photos/products/{tma_id}.jpg"
+    _save(data)
+
+    return _to_dict_resp(
+        True,
+        msg=f"Пакет сгенерирован ({kind}): {label_data['name']}",
+        path=str(out_path),
+        kind=kind,
+        applied=label_data,
+    )
+
+
+def shop_render_packs_bulk(subcategory: str, skip_if_photo: bool = True) -> str:
+    data = _load()
+    matched = []
+    for p in data["products"]:
+        sub = p.get("subcategory", "")
+        if subcategory == sub or sub.startswith(subcategory):
+            matched.append(p)
+    if not matched:
+        return _to_dict_resp(False, error=f"Не найдено карточек по {subcategory}")
+
+    rendered, needs_input, skipped, errors = [], [], [], []
+    for p in matched:
+        kind = pack_renderer.kind_from_subcategory(p.get("subcategory", ""))
+        if kind not in ("espresso", "filter"):
+            skipped.append({"id": p["id"], "reason": "no template (200г / прочее)"})
+            continue
+        if skip_if_photo and p.get("photo"):
+            # Пропускаем те у которых уже есть фото
+            skipped.append({"id": p["id"], "reason": "photo exists"})
+            continue
+        missing = pack_renderer.find_missing(p)
+        if missing:
+            needs_input.append({"id": p["id"], "name": p.get("name"),
+                                "missing": missing})
+            continue
+        # Рендерим
+        try:
+            from datetime import date
+            if not p.get("roast_date"):
+                p["roast_date"] = date.today().strftime("%d.%m.%Y")
+            if not p.get("batch"):
+                p["batch"] = "1"
+            label_data = pack_renderer.build_label_data(p)
+            out_path = PHOTOS_DIR / f"{p['id']}.jpg"
+            pack_renderer.render(kind, label_data, out_path)
+            p["photo"] = f"photos/products/{p['id']}.jpg"
+            rendered.append({"id": p["id"], "name": p.get("name"), "kind": kind})
+        except Exception as e:
+            errors.append({"id": p["id"], "error": f"{type(e).__name__}: {e}"})
+    _save(data)
+
+    return _to_dict_resp(
+        True,
+        msg=f"Отрендерено {len(rendered)}, ждут данных {len(needs_input)}, "
+            f"пропущено {len(skipped)}, ошибок {len(errors)}",
+        rendered=rendered[:50],
+        needs_input=needs_input[:50],
+        skipped=skipped[:50],
+        errors=errors[:50],
+        rendered_count=len(rendered),
+        needs_input_count=len(needs_input),
+    )
+
+
 # ── Диспетчер ──
 
 def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
@@ -638,6 +817,10 @@ def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
             return shop_publish(**input_data)
         if name == "shop_catalog_lookup":
             return shop_catalog_lookup(**input_data)
+        if name == "shop_render_pack":
+            return shop_render_pack(**input_data)
+        if name == "shop_render_packs_bulk":
+            return shop_render_packs_bulk(**input_data)
         return _to_dict_resp(False, error=f"Неизвестный тул: {name}")
     except TypeError as e:
         return _to_dict_resp(False, error=f"Неверные аргументы для {name}: {e}")
