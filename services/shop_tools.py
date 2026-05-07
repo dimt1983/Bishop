@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -62,21 +63,31 @@ _TOOL_GET = {
 
 _TOOL_UPDATE_FIELD = {
     "name": "shop_update_field",
-    "description": "Обновить поле товара: price/description/stock/tags/name/country/roast/process. "
-                   "Для price указывай fasovka_size (\"200 г\"/\"1 кг\"/...) и new_price. "
-                   "Для description/name/country/roast/process — value (string). "
-                   "Для tags — список (заменяет полностью). "
-                   "Для stock — целое число.",
+    "description": (
+        "Обновить поле товара: price / description / stock / tags / name / "
+        "country / roast / process / recipe_e / recipe_f. "
+        "Для price указывай fasovka_size (\"200 г\" / \"1 кг\" / ...) и new_price — "
+        "карточка автоматически помечается _price_locked=true, чтобы live-merge "
+        "из xlsx-прайса её не перетирал. "
+        "Для description / name / country / roast / process / recipe_e / recipe_f — "
+        "value (string). recipe_e и recipe_f — рецепты приготовления для эспрессо "
+        "и фильтра соответственно. "
+        "Для tags — список строк (полностью заменяет старый набор)."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
             "tma_id": {"type": "string"},
-            "field": {"type": "string", "enum": ["price","description","stock","tags","name","country","roast","process"]},
+            "field": {
+                "type": "string",
+                "enum": ["price", "description", "stock", "tags", "name",
+                         "country", "roast", "process", "recipe_e", "recipe_f"],
+            },
             "value": {"description": "Новое значение (тип зависит от поля)"},
             "fasovka_size": {"type": "string", "description": "Только для field=price (например '1 кг')"},
             "new_price": {"type": "number", "description": "Только для field=price"},
         },
-        "required": ["tma_id","field"],
+        "required": ["tma_id", "field"],
     },
 }
 
@@ -181,11 +192,34 @@ _TOOL_PUBLISH = {
     },
 }
 
+_TOOL_CATALOG_LOOKUP = {
+    "name": "shop_catalog_lookup",
+    "description": (
+        "Найти позицию в Roastberry_Каталог_2026.pdf по имени и вернуть её "
+        "описание, теги, секцию каталога (МОНОСОРТА / МИКРОЛОТЫ BLACK EDITION / "
+        "МИКРОЛОТЫ BORЩ EDITION / СМЕСИ), Q-балл. Используй когда Дмитрий "
+        "просит «возьми описание из каталога», «заполни описание у X», "
+        "«посмотри в каталоге что про эту позицию». После получения данных — "
+        "shop_update_field для применения (description, tags, при необходимости "
+        "name)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Имя позиции (как в магазине). Поиск нечёткий."},
+            "min_score": {"type": "number",
+                          "description": "Минимальная схожесть (0-1), default 0.6"},
+        },
+        "required": ["name"],
+    },
+}
+
 
 TOOLS_OWNER = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_UPDATE_FIELD,
                _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_ADD, _TOOL_REMOVE,
-               _TOOL_SEND_PHOTO, _TOOL_PUBLISH]
-TOOLS_READONLY = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_SEND_PHOTO]
+               _TOOL_SEND_PHOTO, _TOOL_PUBLISH, _TOOL_CATALOG_LOOKUP]
+TOOLS_READONLY = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_SEND_PHOTO,
+                  _TOOL_CATALOG_LOOKUP]
 
 
 # ─── Реализация ─────────────────────────────────────────────────────────────
@@ -262,8 +296,12 @@ def shop_update_field(tma_id: str, field: str, value=None,
                                  available=[f["size"] for f in p.get("fasovka", [])])
         old = fa["price"]
         fa["price"] = float(new_price)
+        # Помечаем карточку как ручную цену — иначе live_prices_api в TG-BOT
+        # перетрёт обратно по fuzzy-матчу из xlsx-прайса.
+        p["_price_locked"] = True
         _save(data)
-        return _to_dict_resp(True, msg=f"Цена {fasovka_size} обновлена: {old} → {new_price}")
+        return _to_dict_resp(True,
+                             msg=f"Цена {fasovka_size} обновлена: {old} → {new_price} (locked)")
     if field == "stock":
         try:
             v = int(value)
@@ -279,7 +317,8 @@ def shop_update_field(tma_id: str, field: str, value=None,
         _save(data)
         return _to_dict_resp(True, msg=f"Теги: {p['tags']}")
     # текстовые поля
-    if field in ("name", "description", "country", "roast", "process"):
+    if field in ("name", "description", "country", "roast", "process",
+                 "recipe_e", "recipe_f"):
         p[field] = str(value or "")
         _save(data)
         return _to_dict_resp(True, msg=f"Поле {field} обновлено")
@@ -487,6 +526,91 @@ def shop_publish(comment: str = "Bishop: shop update") -> str:
         return _to_dict_resp(False, error=f"Git ошибка: {e} {stderr[:300]}")
 
 
+# ── Каталог: lookup описаний/тегов из Roastberry_Каталог_2026.pdf ──
+
+CATALOG_PDF_PATH = Path(
+    "/root/projects/ai-agents-rb/Прайсы/чистовики/Roastberry_Каталог_2026.pdf"
+)
+_CATALOG_CACHE = {"data": None, "mtime": 0}
+
+
+def _load_catalog_pages() -> list[str]:
+    """Возвращает список текстов страниц PDF-каталога. Кэширует по mtime."""
+    if not CATALOG_PDF_PATH.exists():
+        return []
+    mtime = CATALOG_PDF_PATH.stat().st_mtime
+    if _CATALOG_CACHE["data"] is not None and _CATALOG_CACHE["mtime"] == mtime:
+        return _CATALOG_CACHE["data"]
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+    pages = []
+    with pdfplumber.open(CATALOG_PDF_PATH) as pdf:
+        for pg in pdf.pages:
+            pages.append(pg.extract_text() or "")
+    _CATALOG_CACHE["data"] = pages
+    _CATALOG_CACHE["mtime"] = mtime
+    return pages
+
+
+def _norm_for_search(s: str) -> str:
+    s = (s or "").lower().replace("ё", "е")
+    s = re.sub(r"[^а-яa-z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def shop_catalog_lookup(name: str, min_score: float = 0.5) -> str:
+    """Ищет упоминания позиции в Roastberry_Каталог_2026.pdf.
+
+    Возвращает фрагменты текста (страница + контекст вокруг упоминания) —
+    Bishop сам выделит из них описание/рецепты/Q-балл и применит к карточке
+    через shop_update_field."""
+    pages = _load_catalog_pages()
+    if not pages:
+        return _to_dict_resp(False,
+                             error=f"Каталог не найден или пустой: {CATALOG_PDF_PATH}")
+
+    # Слова из запроса (без шумовых)
+    qwords = [w for w in _norm_for_search(name).split() if len(w) >= 3]
+    if not qwords:
+        return _to_dict_resp(False, error="Слишком короткое имя для поиска")
+
+    hits = []
+    for page_idx, text in enumerate(pages, start=1):
+        norm = _norm_for_search(text)
+        # Сколько слов из запроса встречается на этой странице
+        matched = sum(1 for w in qwords if w in norm)
+        score = matched / len(qwords)
+        if score < min_score:
+            continue
+        # Найдём первое упоминание ключевого слова и вырежем абзац вокруг (±400 символов)
+        anchor = -1
+        for w in qwords:
+            idx = norm.find(w)
+            if idx >= 0:
+                anchor = idx
+                break
+        if anchor < 0:
+            continue
+        start = max(0, anchor - 200)
+        end = min(len(text), anchor + 600)
+        snippet = text[start:end].strip()
+        hits.append({"page": page_idx, "score": round(score, 2),
+                     "snippet": snippet})
+
+    if not hits:
+        return _to_dict_resp(False,
+                             error=f"Имя '{name}' в каталоге не найдено")
+    # Отсортируем по score, вернём топ-3
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return _to_dict_resp(True,
+                         msg=f"Найдено {len(hits)} упоминаний",
+                         catalog_pdf=str(CATALOG_PDF_PATH),
+                         hits=hits[:3])
+
+
 # ── Диспетчер ──
 
 def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
@@ -513,6 +637,8 @@ def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
             return shop_send_photo(**input_data)
         if name == "shop_publish":
             return shop_publish(**input_data)
+        if name == "shop_catalog_lookup":
+            return shop_catalog_lookup(**input_data)
         return _to_dict_resp(False, error=f"Неизвестный тул: {name}")
     except TypeError as e:
         return _to_dict_resp(False, error=f"Неверные аргументы для {name}: {e}")

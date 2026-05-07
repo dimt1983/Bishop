@@ -10,3 +10,5 @@ pydantic-settings==2.5.2
 # Для прайс-тулы (импортирует /root/projects/ai-agents-rb/Прайсы/price_manager.py)
 openpyxl==3.1.5
 reportlab==4.2.5
+# Для catalog_lookup — парсинг Roastberry_Каталог_2026.pdf
+pdfplumber==0.11.9

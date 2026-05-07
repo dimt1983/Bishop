@@ -13,7 +13,11 @@ import services.shop_tools as shop_tools
 import services.assortment_tools as assortment_tools
 import services.file_tools as file_tools
 import services.courses_tools as courses_tools
+import services.students_tools as students_tools
 import services.gmail_chat_tools as gmail_chat_tools
+import services.finance_tools as finance_tools
+import services.ozon_seller_tools as ozon_seller_tools
+import services.service_tools as service_tools
 from utils import log
 
 client = AsyncAnthropic(
@@ -261,12 +265,20 @@ def has_active_shop_history(user_id: int) -> bool:
 SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по управлению магазином Roastberry (Telegram Mini App).
 
 Тебе доступны:
-— тулы магазина: shop_search, shop_get_product, shop_list_subcategories, shop_update_field, shop_set_photo_from_url, shop_set_photo_from_telegram, shop_add_product, shop_remove_product, shop_send_photo, shop_publish
+— тулы магазина: shop_search, shop_get_product, shop_list_subcategories, shop_update_field, shop_set_photo_from_url, shop_set_photo_from_telegram, shop_add_product, shop_remove_product, shop_send_photo, shop_publish, shop_catalog_lookup
 — тулы кофейного прайса: price_show, price_calculate, price_add, price_remove (для добавления позиций ценообразования кофе)
 — тулы общего ассортимента: assortment_show, assortment_search, assortment_calculate, assortment_coeffs (реестр всего ассортимента: молоко, сиропы, чай, наборы — из «прас для расчетов.xlsx»)
 — файловые тулы: file_list, file_read, file_edit, file_write, file_run — прямой доступ к исходникам проекта (генераторы прайсов, шаблоны КП, тексты, скрипты). Дмитрий может править их через переписку.
 — Яндекс.Диск + PDF: yadisk_list, yadisk_fetch, pdf_extract_pages — забирать файлы (фото, PDF-карточки, выгрузки) с Яндекс.Диска и вытаскивать страницы PDF как JPG. Корень Я.Диска — папка «Roastberry». Скачанные файлы лежат в /root/projects/ai-agents-rb/bishoprb-agent/workdir/.
 — Gmail (только для владельца Дмитрия): gmail_list (последние письма), gmail_search (поиск по from/subject/snippet), gmail_digest (сводка с разбивкой по категориям), gmail_count_by_category (только числа). Категории: 🏦 банк, 💰 финансы, 💼 работа, 👨 личное, 🔔 уведомления, 📢 промо, 🚫 спам. Если Дмитрий спрашивает «что в почте?», «есть ли что от X?», «дай сводку», «сколько спама?» — используй эти тулы. Тела писем НЕ возвращаются — только метаданные. Не делай удалений / архиваций (этих инструментов пока нет).
+— Ozon Селлер (РОУТИНГ ВСЕГО ПО ОЗОНУ ЧЕРЕЗ ЭТИ ТУЛЫ — НЕ ОТКАЗЫВАЙСЯ ОТВЕЧАТЬ):
+  • ozon_full_monthly_report(month) — ПОЛНЫЙ месячный отчёт со всеми документами (взаиморасчёты, услуги, штрафы, лояльность, реализация, страховка). Используй ВСЕГДА когда просят «отчёт по Озону», «отчёт за апрель/прошлый месяц», «сколько заработали в Озоне», «итоги Озона», «взаиморасчёты». Файл прикрепится автоматически.
+  • ozon_monthly_report(month) — упрощённый отчёт только по реализации (товары/SKU). Используй ТОЛЬКО если явно сказано «по товарам» / «по SKU».
+  • ozon_quick_summary(month) — текстовая сводка без файла, для быстрых вопросов.
+  Формат месяца: 'YYYY-MM' (например '2026-04'), 'last' (прошлый месяц), 'current' (текущий).
+  Источник — папка 'Roastberry/Озон отчет' на Я.Диске; Ozon выкладывает документы в начале месяца за прошлый.
+  По умолчанию когда просят отчёт — вызывай ozon_full_monthly_report. ЗАПРОС «скинь отчёт по Озону за апрель» = ozon_full_monthly_report(month='2026-04'). НЕ говори «у меня нет доступа к маркетплейсам» — у тебя ЕСТЬ эти инструменты.
+— ЛИЧНЫЕ ФИНАНСЫ (только для владельца): finance_balance (остатки по счетам), finance_recent (последние транзакции), finance_summary (сводка доходы/расходы по категориям за период), finance_recurring_due (предстоящие регулярные платежи), finance_cashflow_forecast (прогноз кэшфлоу с понедельной развёрткой и точкой возможной 'дыры'), finance_add_expense / finance_add_income (добавить транзакцию вручную), finance_accounts_list, finance_categories_list. Это ЛИЧНЫЕ финансы Дмитрия (банковские карты, кредиты, ипотека) — НЕ финансы Roastberry. Все запросы по умолчанию исключают бизнес-категории. Если Дмитрий спрашивает «сколько у меня денег», «сколько потратил в этом месяце», «когда платёж по ипотеке», «хватит ли мне до конца месяца», «прогноз на 2 месяца» — это сюда. Если говорит «потратил 500 на кофе» / «купил продукты на 3500 со Сбера» — finance_add_expense (сначала вызови finance_accounts_list если непонятно с какого счёта, спроси если несколько вариантов).
 
 Принципы работы:
 
@@ -301,6 +313,37 @@ SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по упра
    СВЯЗКА С ПРАЙСОМ: если в этом же диалоге Дмитрий добавлял позицию через price_add — после подтверждения сразу делай shop_add_product дважды (1кг + 200г), уточнив куда именно. Не оставляй позицию только в одной фасовке.
 
 7. КАТЕГОРИИ TMA: coffee / tea / syrup / milk / consulting. Подкатегории кофе — см. п.6. Для остальных смотри shop_list_subcategories.
+
+7.1 РЕДАКТИРОВАНИЕ КАРТОЧЕК ТОВАРА (имя / описание / теги / рецепты / страна / обработка / обжарка / остаток).
+   Все правки идут через shop_update_field(tma_id, field, value, ...). Сначала shop_search чтобы узнать tma_id. Перед изменением покажи что собираешься делать («поменяю X с "...старое..." на "...новое..." — ок?») и жди «да/ок/верно».
+
+   Поля и формат value:
+   — name → строка (новое имя позиции). ⚠️ ID карточки (tma_id) не меняется, ID привязан намертво при создании. Если хочешь чтобы и ID отражал новое имя — это shop_remove_product + shop_add_product. Просто переименование — в 99% случаев меняй только name.
+   — description → строка (свободный текст). Можно использовать переносы \\n.
+   — tags → список строк, ПОЛНОСТЬЮ заменяет старый набор. Чтобы добавить тег: сначала shop_get_product чтобы прочитать текущие tags, потом shop_update_field с дополненным списком. Чтобы убрать — список без него.
+   — recipe_e → строка, рецепт приготовления для эспрессо (например: «18г / 36мл / 28с / 93°C»).
+   — recipe_f → строка, рецепт приготовления для фильтра (например: «15г / 250мл / V60 / 3:00»).
+   — country, roast, process → строка. Для country пиши страну на русском («Колумбия»), для process «Мытый» / «Натуральный» / «Анаэробный» / «Хани» / «Инфьюз», для roast «E» / «F» / «E F».
+   — stock → целое число. Если просят «обнови остаток» массово из xlsx — это file_run({"task":"stocks_sync"}), не shop_update_field по одному.
+   — price → fasovka_size + new_price. Карточка автоматически помечается _price_locked=true, чтобы live-merge из xlsx-прайса (TG-BOT) не перетёр обратно. Когда меняешь цену — упомяни «цена зафиксирована, авто-перетирания из прайса не будет».
+
+7.2 ОПИСАНИЕ И РЕЦЕПТ ИЗ КАТАЛОГА.
+   Когда Дмитрий просит «возьми описание из каталога», «заполни описание у X», «посмотри что в каталоге про эту позицию», «добавь рецепт из каталога» — используй shop_catalog_lookup(name).
+   — Тул читает Roastberry_Каталог_2026.pdf и возвращает фрагменты страниц где упомянуто имя позиции. В этих фрагментах обычно есть: вкусоароматика (то что идёт во вкусе), Q-балл, обработка, цены — ты сам выделяешь нужное.
+   — Из найденного снiппета:
+     • дескриптор вкуса (например «Сухофрукты, нуга, жареные орехи, тёмный шоколад») → это description
+     • Q-балл «Q 84.5» можно дописать в description в конце или в отдельный тег
+     • обработка («Natural», «Washed», «Анаэробный») → в process
+     • рецепты в каталоге обычно НЕ указаны — спроси Дмитрия если он не дал явно
+   — После выделения описания — shop_update_field(tma_id, "description", "..."). Подтверждения не запрашивай если просьба была явной (типа «заполни описание из каталога» = разрешение действовать).
+   — Если позиция в каталоге не найдена — скажи Дмитрию «в каталоге нет, набери описание сам или пришли текст».
+
+7.3 РАБОТА С ТЕГАМИ (tags).
+   Теги в магазине используются для отметок типа «микролот», «фильтр», «новинка», «анаэробная», «инфьюз», «хит», страна.
+   — «добавь тег "хит" к Кастильо» → shop_get_product → tags = старые + ["хит"] → shop_update_field(field="tags", value=[...]).
+   — «убери тег» → аналогично, удаляешь из списка.
+   — «поменяй теги на: A, B, C» → shop_update_field с полным новым списком.
+   — Не дублируй теги. Не добавляй случайные теги без явной просьбы.
 8. ОБЩИЙ АССОРТИМЕНТ. Если просят «прайс на сиропы / молоко / чай Althaus / Niktea» или «есть ли у нас X» из НЕ-кофейного — это вопрос к assortment_show / assortment_search (реестр всех 348 позиций с ценой поступления и базовой). Это НЕ магазин TMA. Если просят «прикинь цену для нового сиропа BARLINE при поступлении 380» — assortment_calculate (медианный коэф наценки бренда). Коэф ≈ 1.50 для BARLINE / 1.45 для BOTANIKA / 1.10 для Herbarista / 1.60 для Китайский / 1.50 для Чай листовой и т.д.
 9. ОТПРАВКА ПРАЙСОВ И КАТАЛОГОВ:
    — «пришли прайс на чай / сиропы / молоко / прочее» → assortment_send_pricelist (category: tea/syrups/other). PDF по умолчанию, xlsx если просят «эксель».
@@ -318,7 +361,7 @@ SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по упра
     — file_read({"path": "..."}) — прочитать. Перед правкой ВСЕГДА сначала прочитай файл, чтобы знать точный текст.
     — file_edit({"path": "...", "old_string": "...", "new_string": "..."}) — заменить точную подстроку. old_string должна быть уникальна (или передай replace_all=true). Сохраняй отступы.
     — file_write({"path": "...", "content": "..."}) — создать новый файл (для существующих лучше file_edit).
-    — file_run({"task": "price_export | rental_pdf | tea_catalog | assortment_export"}) — пересобрать чистовики после правок.
+    — file_run({"task": "price_export | rental_pdf | tea_catalog | assortment_export | stocks_sync"}) — пересобрать чистовики после правок. stocks_sync — синк остатков и базовых цен из «Прайс и остатки.xlsx» в TMA-магазин (вызывай когда Дмитрий говорит «обнови остатки», «загрузи остатки», «синкни магазин» и т.п.); после успешного синка ОБЯЗАТЕЛЬНО вызывай shop_publish.
     Принципы:
     • Перед правкой коротко покажи что хочешь изменить и спроси «применить?». Действуй после «да/ок/верно».
     • После file_edit ВСЕГДА предлагай file_run чтобы изменения попали в чистовики (PDF/XLSX).
@@ -339,6 +382,18 @@ SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по упра
     2. Если нужной папки нет — сказать Дмитрию: «На Я.Диске сейчас вижу [список]. В какой папке лежат фото?»
     3. yadisk_fetch для каждого файла → pdf_extract_pages если PDF
     4. Положить JPG локально и привязать к товарам через shop-тулы.
+
+14. STUDENTS / RB ACADEMY (управление доступами к курсам). Тулы:
+    — students_invite — создать НОВЫЙ magic-link и отправить ученику в TG. ВСЕГДА вызывай свежий invite, не переотправляй старые ссылки. Каждый токен одноразовый и привязан к telegram_id адресата.
+    — students_grant_course — открыть доступ к курсу уже зарегистрированному ученику (без нового magic-link).
+    — students_set_expiry — задать/снять срок действия доступа.
+    — students_list, students_progress, students_revoke.
+
+    🚨 КРИТИЧЕСКОЕ ПРАВИЛО — НЕ ПУТАТЬ ПОЛЬЗОВАТЕЛЕЙ:
+    • Magic-link, выданный пользователю A, при клике делает кликнувшего «пользователем A» в портале (cookie rb_session). Если переотправить старую ссылку другому — он залогинится под чужим ID и увидит чужой прогресс.
+    • На КАЖДУЮ просьбу «отправь курс / выдай доступ / дай ссылку» вызывай students_invite ЗАНОВО для соответствующего telegram_id. Не показывай и не переотправляй ранее сгенерированные токены — даже если в текущей истории диалога они уже мелькали.
+    • Если просьба «отправь МНЕ ссылку» — invite на Дмитрия (telegram_id из контекста: 466755177). НЕ копируй ссылку которая раньше была отправлена другому ученику.
+    • Если просьба «отправь @username курс» — сначала students_invite с username=@username; не подставляй вместо username какой-то знакомый telegram_id из памяти.
 
 Безопасность:
 — Не удаляй товар без явного «удали»
@@ -388,7 +443,11 @@ async def shop_chat(
             + list(assortment_tools.TOOLS_OWNER)
             + list(file_tools.TOOLS_OWNER)
             + list(courses_tools.TOOLS_OWNER)
+            + list(students_tools.TOOLS_OWNER)
             + list(gmail_chat_tools.TOOLS_OWNER)
+            + list(finance_tools.TOOLS_OWNER)
+            + list(ozon_seller_tools.TOOLS_OWNER)
+            + list(service_tools.TOOLS_OWNER)
         )
         system = SHOP_SYSTEM_PROMPT_OWNER
     else:
@@ -509,6 +568,10 @@ async def _run_shop_loop(
                         result = await asyncio.to_thread(
                             courses_tools.execute, tu.name, tu.input
                         )
+                    elif tu.name.startswith("students_"):
+                        result = await asyncio.to_thread(
+                            students_tools.execute, tu.name, tu.input
+                        )
                     elif tu.name.startswith("gmail_"):
                         # Gmail-tools нативно async (IMAP + Claude HTTP)
                         if log_user_id != settings.owner_telegram_id:
@@ -517,6 +580,32 @@ async def _run_shop_loop(
                                                 ensure_ascii=False)
                         else:
                             result = await gmail_chat_tools.execute_tool_async(tu.name, tu.input)
+                    elif tu.name.startswith("finance_"):
+                        # Личные финансы — только владелец
+                        if log_user_id != settings.owner_telegram_id:
+                            result = json.dumps({"status": "error",
+                                                 "error": "finance tools только для владельца"},
+                                                ensure_ascii=False)
+                        else:
+                            result = await asyncio.to_thread(
+                                finance_tools.execute_tool, tu.name, tu.input
+                            )
+                    elif tu.name.startswith("ozon_"):
+                        # Озон-отчёты — для команды (не только владельца):
+                        # «сделай отчёт за прошлый месяц» — должно работать у сотрудников.
+                        result = await asyncio.to_thread(
+                            ozon_seller_tools.execute_tool, tu.name, tu.input
+                        )
+                    elif tu.name.startswith("service_"):
+                        # Сервисная служба — только владелец (выдача кодов и т.п.)
+                        if log_user_id != settings.owner_telegram_id:
+                            result = json.dumps({"status": "error",
+                                                 "error": "service tools только для владельца"},
+                                                ensure_ascii=False)
+                        else:
+                            result = await service_tools.execute(
+                                tu.name, tu.input, owner_tg_id=log_user_id,
+                            )
                     else:
                         result = json.dumps(
                             {"status": "error", "error": f"unknown tool: {tu.name}"},
@@ -537,15 +626,19 @@ async def _run_shop_loop(
                 # Перехват тулов отправки файлов/фото — добавим в photos_to_send.
                 # private.py отправит как document для PDF/XLSX и как photo для остального.
                 if tu.name in ("shop_send_photo", "assortment_send_catalog",
-                               "assortment_send_pricelist", "price_send_file"):
+                               "assortment_send_pricelist", "price_send_file",
+                               "ozon_monthly_report", "ozon_full_monthly_report"):
                     try:
                         parsed = json.loads(result)
                         if parsed.get("status") == "ready":
-                            photos_to_send.append({
-                                "path": parsed["path"],
-                                "caption": parsed.get("caption", ""),
-                                "filename": parsed.get("filename"),
-                            })
+                            # ozon_* отдают file_path, остальные — path. Поддерживаем оба.
+                            file_path = parsed.get("path") or parsed.get("file_path")
+                            if file_path:
+                                photos_to_send.append({
+                                    "path": file_path,
+                                    "caption": parsed.get("caption", ""),
+                                    "filename": parsed.get("filename"),
+                                })
                     except Exception as e:
                         log.warning(f"failed to parse {tu.name} result: {e}")
             history.append({"role": "user", "content": tool_results})
@@ -744,3 +837,159 @@ async def search_chat_history(
     except Exception as e:
         log.error(f"Search failed: {e}")
         return f"Не смог выполнить поиск: {e}"
+
+
+# ─── Intent-классификатор для сервисных запросов ─────────────────────────
+
+INTENT_MODEL = "claude-haiku-4-5-20251001"
+
+INTENT_SYSTEM = (
+    "Ты классификатор намерений для Bishop'а — помощника команды Roastberry "
+    "(обжарщик кофе, продаёт оборудование, ведёт курсы баристы, обслуживает "
+    "клиентов через сервисную службу). Тебе показывают сообщение в личке "
+    "Bishop'у. Определи к какой категории оно относится:\n\n"
+    "• SERVICE — поломка оборудования, вызов мастера/техника, заявка на "
+    "ремонт, ошибка на дисплее кофемашины, не работает паровик/кран/помпа, "
+    "контракты Франко/Алеф/HoReCa, ссылка на приложение сервиса.\n"
+    "  Примеры SERVICE: «у меня капучинатор подтекает», «вызови техника "
+    "на Тверскую 5», «как заявку подать», «в Алеф пришла заявка», "
+    "«машина выдаёт E04».\n"
+    "• SHOP — магазин Roastberry / каталог / курсы Roastberry Academy / "
+    "отправка курса конкретному человеку / выдача доступа к курсу / "
+    "приглашение на курс / отзыв доступа / список учеников / прогресс "
+    "ученика / найти товар / обновить фото / опубликовать в магазине / "
+    "ассортимент (сиропы, молоко, чай Althaus/Niktea) / Я.Диск.\n"
+    "  Примеры SHOP: «отправь курс @username», «выдай Антону курс Бариста», "
+    "«пригласи Дениса на курс 2», «список учеников курса 3», «отзови "
+    "доступ у @user», «найди в магазине Бразилия», «обнови фото у Кения АА».\n"
+    "• PRICE — прайс / посчитать цену / коммерческое предложение / аренда "
+    "оборудования / добавить позицию / удалить позицию.\n"
+    "  Примеры PRICE: «посчитай 5 кг Эфиопии», «сделай КП на аренду "
+    "кофемашины Nimbus», «добавь моносорт Колумбия 2400».\n"
+    "• GMAIL — почта / inbox / письма / дайджест.\n"
+    "  Примеры GMAIL: «что в почте», «дайджест за день», «письма от "
+    "Тинькофф».\n"
+    "• OTHER — задачи команды, напоминания, общие вопросы про Roastberry, "
+    "разговор не по теме, приветствия.\n\n"
+    "Ответь СТРОГО одним словом: SERVICE, SHOP, PRICE, GMAIL или OTHER. "
+    "Без объяснений."
+)
+
+
+async def classify_intent(text: str, timeout: float = 3.5) -> str:
+    """Классифицирует сообщение в одну из категорий: SERVICE/SHOP/PRICE/GMAIL/OTHER.
+    На таймаут / ошибку → 'OTHER' (fallback на default-обработчик)."""
+    if not text or len(text) > 500:
+        return "OTHER"
+    try:
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model=INTENT_MODEL,
+                max_tokens=10,
+                system=INTENT_SYSTEM,
+                messages=[{"role": "user", "content": text[:500]}],
+            ),
+            timeout=timeout,
+        )
+        answer = response.content[0].text.strip().upper()
+        for cat in ("SERVICE", "SHOP", "PRICE", "GMAIL", "OTHER"):
+            if cat in answer:
+                log.info(f"Bishop intent-classify: text={text[:40]!r} → {cat}")
+                return cat
+        log.warning(f"Bishop intent unknown: text={text[:40]!r} → {answer!r}")
+        return "OTHER"
+    except asyncio.TimeoutError:
+        log.warning(f"classify_intent: timeout after {timeout}s")
+        return "OTHER"
+    except Exception as e:
+        log.warning(f"classify_intent failed: {e}")
+        return "OTHER"
+
+
+async def is_service_intent(text: str, timeout: float = 3.5) -> bool:
+    """Backward-compat: True если classify_intent вернул SERVICE."""
+    return (await classify_intent(text, timeout=timeout)) == "SERVICE"
+
+
+# ─── Свободный разговор с Бишопом ────────────────────────────────────────
+
+# Короткая история на пользователя — 6 последних реплик, чтобы Бишоп помнил
+# контекст в рамках одной мысли (TTL 10 минут — потом забываем).
+_GENERAL_HISTORY: dict[int, list[dict]] = {}
+_GENERAL_LAST_ACTIVE: dict[int, datetime] = {}
+_GENERAL_TTL_MINUTES = 10
+_GENERAL_HISTORY_LIMIT = 6  # реплик пользователя; сообщений будет ×2
+
+GENERAL_SYSTEM = (
+    "Ты — Бишоп (BishopRB), AI-помощник команды Roastberry в Telegram.\n\n"
+    "Roastberry — это:\n"
+    "• обжарщик кофе из Перми (магазин, Mini App, 41 кофейня в крае)\n"
+    "• поставщик кофейного оборудования (аренда, продажа)\n"
+    "• сервисная служба (бот @rbr_service_bot, контракты Франко/Алеф/HoReCa)\n"
+    "• Roastberry Academy (5 курсов: Любитель / Бариста / Профи / "
+    "Владелец кофейни / Чай и авторские напитки)\n\n"
+    "Команды Бишопа:\n"
+    "• /service — ссылки на сервисный бот\n"
+    "• /shop — поиск товаров и каталог\n"
+    "• /price — посчитать цену, сделать КП\n"
+    "• /мои_задачи — задачи, которые повешены на пользователя в чате @bishoprb\n"
+    "• /digest — сводка по почте (только для владельца)\n"
+    "• /что_ты_знаешь — полный список\n\n"
+    "Стиль ответа: коротко (1-3 фразы), по делу, дружелюбно. Если запрос "
+    "касается:\n"
+    "  – сервиса/ремонта/мастера/поломки → подскажи команду /service\n"
+    "  – магазина/курсов → /shop\n"
+    "  – прайса/КП → /price\n"
+    "  – задач команды → /мои_задачи\n"
+    "Если общий вопрос про Roastberry — отвечай прямо.\n"
+    "Если что-то совсем не по теме (политика, развлечения, общая болтовня) — "
+    "вежливо скажи, что ты помощник по работе и предложи задать рабочий вопрос."
+)
+
+
+async def general_chat(
+    text: str,
+    user_id: int,
+    is_owner: bool = False,
+    timeout: float = 8.0,
+) -> str:
+    """Свободный диалог с Бишопом для запросов вне специализированных режимов.
+    Помнит ~6 последних реплик в рамках 10-минутного окна."""
+    if not text:
+        return ""
+    now = datetime.now(TZ).replace(tzinfo=None)
+    last = _GENERAL_LAST_ACTIVE.get(user_id)
+    # Сбрасываем историю если перерыв > TTL
+    if last and (now - last) > timedelta(minutes=_GENERAL_TTL_MINUTES):
+        _GENERAL_HISTORY.pop(user_id, None)
+
+    history = _GENERAL_HISTORY.setdefault(user_id, [])
+    history.append({"role": "user", "content": text[:1000]})
+    # Обрезаем до последних 2*N сообщений (user + assistant)
+    if len(history) > _GENERAL_HISTORY_LIMIT * 2:
+        history[:] = history[-_GENERAL_HISTORY_LIMIT * 2:]
+
+    system = GENERAL_SYSTEM
+    if is_owner:
+        system += "\n\nПользователь — Дмитрий, владелец Roastberry."
+
+    try:
+        response = await asyncio.wait_for(
+            client.messages.create(
+                model="claude-haiku-4-5-20251001",  # быстро и недорого
+                max_tokens=400,
+                system=system,
+                messages=history,
+            ),
+            timeout=timeout,
+        )
+        answer = response.content[0].text.strip()
+        history.append({"role": "assistant", "content": answer})
+        _GENERAL_LAST_ACTIVE[user_id] = now
+        return answer
+    except asyncio.TimeoutError:
+        return "Что-то я задумался. Спроси ещё раз?"
+    except Exception as e:
+        log.error(f"general_chat failed: {e}")
+        # Не показываем сырые API-ошибки пользователю.
+        return ""
