@@ -196,6 +196,32 @@ _TOOL_PUBLISH = {
     },
 }
 
+_TOOL_SET_PHOTO_PDF = {
+    "name": "shop_set_photo_from_pdf",
+    "description": (
+        "Извлечь страницу из PDF и поставить как фото товара. Используй "
+        "когда Дмитрий говорит «возьми картинку из этого PDF», «прикрепи "
+        "страницу 2 как фото у Кастильо» и т.п. PDF должен быть локально "
+        "(скачай через yadisk_fetch если он на Я.Диске). Страница "
+        "конвертируется в JPG и сохраняется в "
+        "tma_static/photos/products/<tma_id>.jpg, привязка к карточке "
+        "автоматическая."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tma_id": {"type": "string", "description": "ID карточки в магазине"},
+            "pdf_path": {"type": "string",
+                         "description": "Локальный абсолютный путь к PDF (после yadisk_fetch или из проекта)."},
+            "page": {"type": "integer",
+                     "description": "Номер страницы 1-based. По умолчанию 1."},
+            "dpi": {"type": "integer",
+                    "description": "Разрешение рендера, по умолчанию 200 (для качества фото)."},
+        },
+        "required": ["tma_id", "pdf_path"],
+    },
+}
+
 _TOOL_RENDER_PACKS_BULK = {
     "name": "shop_render_packs_bulk",
     "description": (
@@ -275,7 +301,8 @@ _TOOL_CATALOG_LOOKUP = {
 
 
 TOOLS_OWNER = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_UPDATE_FIELD,
-               _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_ADD, _TOOL_REMOVE,
+               _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_SET_PHOTO_PDF,
+               _TOOL_ADD, _TOOL_REMOVE,
                _TOOL_SEND_PHOTO, _TOOL_PUBLISH, _TOOL_CATALOG_LOOKUP,
                _TOOL_RENDER_PACK, _TOOL_RENDER_PACKS_BULK]
 TOOLS_READONLY = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_SEND_PHOTO,
@@ -735,6 +762,53 @@ def shop_render_pack(tma_id: str, kind: str | None = None) -> str:
     )
 
 
+def shop_set_photo_from_pdf(tma_id: str, pdf_path: str,
+                            page: int = 1, dpi: int = 200) -> str:
+    data = _load()
+    p = next((x for x in data["products"] if x["id"] == tma_id), None)
+    if not p:
+        return _to_dict_resp(False, error=f"Товар не найден: {tma_id}")
+
+    pdf = Path(pdf_path)
+    if not pdf.is_absolute():
+        return _to_dict_resp(False, error="pdf_path должен быть абсолютным")
+    if not pdf.is_file():
+        return _to_dict_resp(False, error=f"PDF не найден: {pdf}")
+
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return _to_dict_resp(False, error="PyMuPDF не установлен")
+
+    try:
+        doc = fitz.open(str(pdf))
+    except Exception as e:
+        return _to_dict_resp(False, error=f"не удалось открыть PDF: {e}")
+
+    try:
+        page_idx = max(1, int(page)) - 1  # 1-based → 0-based
+        if page_idx >= len(doc):
+            return _to_dict_resp(False,
+                                 error=f"страница {page} вне диапазона (страниц всего {len(doc)})")
+        dpi_v = max(72, min(int(dpi or 200), 400))
+        zoom = dpi_v / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = doc[page_idx].get_pixmap(matrix=matrix, alpha=False)
+        PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = PHOTOS_DIR / f"{tma_id}.jpg"
+        pix.save(str(out_path), jpg_quality=90)
+    finally:
+        doc.close()
+
+    p["photo"] = f"photos/products/{tma_id}.jpg"
+    _save(data)
+
+    return _to_dict_resp(True,
+                         msg=f"Страница {page} из PDF поставлена как фото",
+                         path=str(out_path),
+                         dimensions=f"{pix.width}x{pix.height}")
+
+
 def shop_render_packs_bulk(subcategory: str, skip_if_photo: bool = True) -> str:
     data = _load()
     matched = []
@@ -821,6 +895,8 @@ def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
             return shop_render_pack(**input_data)
         if name == "shop_render_packs_bulk":
             return shop_render_packs_bulk(**input_data)
+        if name == "shop_set_photo_from_pdf":
+            return shop_set_photo_from_pdf(**input_data)
         return _to_dict_resp(False, error=f"Неизвестный тул: {name}")
     except TypeError as e:
         return _to_dict_resp(False, error=f"Неверные аргументы для {name}: {e}")
