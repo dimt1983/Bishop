@@ -491,6 +491,21 @@ def shop_add_product(name: str, category: str, subcategory: str,
         "fasovka": fasovka, "stock": int(stock),
         "tags": tags or [], "photo": None,
     }
+    # pair_id для микролотов — связывает 1кг (Эспрессо/Фильтр) и 200г (Блэк/Борщ)
+    # карточки одной позиции, чтоб TMA показала переключатель фасовок на детальной.
+    micro_subs = ("coffee_espresso_microlot", "coffee_filter_microlot",
+                  "coffee_black", "coffee_borshch")
+    if subcategory in micro_subs:
+        # Если уже есть карточка с тем же базовым именем в "парной" подкатегории —
+        # берём её pair_id, иначе генерируем новый по имени.
+        existing_pid = None
+        for x in data["products"]:
+            if x.get("subcategory") in micro_subs and x.get("name", "").strip().lower() == name.strip().lower():
+                if x.get("pair_id"):
+                    existing_pid = x["pair_id"]
+                    break
+        item["pair_id"] = existing_pid or _slug(name)
+
     data["products"].append(item)
     _save(data)
     return _to_dict_resp(True, msg=f"Добавлен товар: {tma_id}", tma_id=tma_id)
