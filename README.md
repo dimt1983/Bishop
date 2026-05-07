@@ -1,58 +1,43 @@
 # BishopRB
 
-Внутренний AI-помощник команды Roastberry на базе Claude.
+Внутренний AI-помощник команды Roastberry на базе Claude — «дирижёр» экосистемы. Подробная карта файлов и ENV — в [CLAUDE.md](./CLAUDE.md).
 
-## Что умеет (v1)
+## Что умеет
 
-- 📋 Принимает постановки задач через `@bishoprb <кому> <что> <когда>` в рабочих чатах
-- 🔔 Напоминает исполнителям в личку (за сутки, утром дедлайна, каждые 3ч после)
-- ✅ Понимает ответы "готово"/"сделал" → закрывает задачу
-- 📅 Понимает "перенеси на ..." → двигает дедлайн + уведомляет постановщика
-- ⚠️ Эскалирует постановщику после 5 напоминаний без ответа
-- 🔍 Ищет по истории чатов по запросу `@bishoprb <вопрос>`
-- 🗂 Автоматически регистрирует чаты при добавлении
+- 📋 Постановки задач через `@bishoprb <кому> <что> <когда>` в чатах + напоминания/эскалации в личку
+- 🛒 Управление магазином (TMA-каталог, фото товаров, публикация → Railway TG-BOT)
+- 💰 Прайс-листы (расчёт, добавление позиций, экспорт PDF/XLSX из xlsx)
+- 🛠 Сервисная служба (выдача кодов техникам/менеджерам, ссылка на Mini App)
+- 🎓 Roastberry Academy (приглашения, доступы, истёкшие)
+- 📧 Gmail-инбокс владельца (классификация писем, /inbox, /digest)
+- 📊 Ozon Seller-аналитика (продажи, отчёты с Я.Диска)
+- 💸 Премия Monkey Grinder (расчёт по выгрузке 1С)
+- 📈 Uptime-мониторинг сервисов экосистемы
 
 ## Стек
 
-- Python 3.11+
-- aiogram 3.x
-- Claude Sonnet 4.5 (Anthropic API)
-- SQLAlchemy async + SQLite
+- Python 3.11+, aiogram 3.13, Anthropic SDK
+- Claude Sonnet 4.5 (tool-use), Haiku 4.5 (классификатор интентов)
+- SQLAlchemy async + SQLite (`bishop.db`)
 - APScheduler
 
-## Deploy на Railway
+## Деплой и запуск
 
-1. Репозиторий должен быть подключён к сервису в Railway
-2. Переменные окружения (Variables):
-   - `TELEGRAM_BOT_TOKEN` — токен от @BotFather
-   - `ANTHROPIC_API_KEY` — ключ Anthropic
-   - `OWNER_TELEGRAM_ID` — ваш telegram ID (для эскалаций владельцу)
-   - `TIMEZONE` — например `Europe/Moscow` (по умолчанию так же)
-3. Railway автоматически использует `Procfile` для запуска
-
-## Локальный запуск
-
+**Прод**: VPS под `systemd`. После правок:
 ```bash
-python -m venv .venv
-source .venv/bin/activate
+git pull && systemctl restart bishop.service
+journalctl -u bishop.service -f   # логи
+```
+
+**Локально**:
+```bash
+python -m venv .venv && source .venv/bin/activate
 pip install -r requirements.txt
-cp .env.example .env  # и заполнить
+cp .env.example .env  # заполнить TELEGRAM_BOT_TOKEN, ANTHROPIC_API_KEY, OWNER_TELEGRAM_ID, GMAIL_USER, ADMIN_API_TOKEN
 python main.py
 ```
 
 ## Настройка бота в @BotFather
 
-- Group Privacy → **OFF** (обязательно)
+- Group Privacy → **OFF** (обязательно — иначе не видит сообщения в чатах)
 - Allow Groups → **ON**
-
-## База данных
-
-SQLite файл `bishop.db` в корне. На Railway volume нужно будет подключить чтобы БД не терялась между деплоями (или мигрировать на Postgres — см. TODO).
-
-## TODO (следующие этапы)
-
-- [ ] Интеграция с sync API wahelp-agent (остатки, каталог)
-- [ ] Еженедельный дайджест владельцу
-- [ ] Выявление клиентских паттернов для wahelp-agent
-- [ ] Миграция SQLite → Postgres для продакшна
-- [ ] Привязка volume в Railway для персистентности
