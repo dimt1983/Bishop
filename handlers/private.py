@@ -41,6 +41,15 @@ GMAIL_KEYWORDS = (
 )
 
 SHOP_KEYWORDS = (
+    # Ozon Селлер — отчёты и аналитика по маркетплейсу
+    "озон", "ozon", "озонe", "озоне", "озона", "озону",
+    "маркетплейс", "маркетплейсе", "продажи на озоне", "продажи озон",
+    "отчет по озон", "отчёт по озон", "отчет озон", "отчёт озон",
+    "взаиморасчёт", "взаиморасчет", "сальдо",
+    "комиссия озон", "штрафы озон", "лояльност",
+    "позаказ", "реализаци", "выручка озон",
+    "сколько в озоне", "сколько с озона",
+    # Магазин (TMA / каталог)
     "магазин", "tma", "mini app", "miniapp",
     "добавь в магазин", "добавь в каталог", "в каталог магазина",
     "обнови фото", "поменяй фото", "загрузи фото", "это фото товара",
@@ -72,6 +81,33 @@ SHOP_KEYWORDS = (
     "вытащи из pdf", "извлеки из pdf", "распакуй pdf",
     "pdf", "пдф", "карточки", "макет упаковки",
     "скачай файл", "забери файл", "возьми файл",
+    # Остатки/сток магазина (sync_prices_stocks)
+    "остатки", "остаток", "обнови остатки", "загрузи остатки",
+    "новый сток", "сток обновился", "обнови сток", "залей остатки",
+    "пересинкуй", "синкни остатки", "синк остатков",
+    "прайс и остатки", "прайс остатки",
+    # Roastberry Academy (students_tools, courses_tools)
+    "академи", "academy", "школ",
+    "курс 1", "курс 2", "курс 3", "курс 4", "курс 5",
+    "курсы", "пройти курс", "доступ к курс",
+    "пригласи", "пригласить", "приглашение",
+    "ученик", "ученица", "ученики", "учеников",
+    "аттестац", "аттестов", "сертификац",
+    "прогрес", "прогресс ученик",
+    "урок ", "уроки", "тест по ", "квиз",
+    "magic-link", "magic link", "магик линк", "ссылку на курс",
+    "открой курс", "открой доступ", "отзови доступ", "отозвать доступ",
+    # Управление студентами / отправка курсов
+    "отправь курс", "отправить курс", "выдай курс", "выдать курс",
+    "пригласи на курс", "пригласить на курс", "приглашение на курс",
+    "доступ на курс", "доступ к курс", "пусти на курс", "запиши на курс",
+    "ученик", "ученики", "студент", "студенты",
+    "академи", "academy",
+    "продли доступ", "ограничь доступ", "временный доступ",
+    "роастберри", "ростберри", "roastberry academy",
+    "команда школы", "список учеников", "покажи учеников",
+    "обнови урок", "поправь урок", "перепиши урок",
+    "перерисуй картинку", "перерисуй иллюстрацию",
 )
 
 
@@ -88,6 +124,88 @@ def _looks_like_shop_request(text: str) -> bool:
 def _looks_like_gmail_request(text: str) -> bool:
     t = (text or "").lower()
     return any(kw in t for kw in GMAIL_KEYWORDS)
+
+
+SERVICE_KEYWORDS = (
+    # Прямые упоминания сервиса
+    "сервис", "service",
+    "вызов", "вызовы", "вызвать мастер",
+    "заявк", "запрос на ремонт", "ремонт",
+    "сервисный бот", "service bot", "rbr_service_bot",
+    # Поломки, проблемы с оборудованием
+    "сломал", "не работа", "не варит", "не включа", "не запуск",
+    "поломк", "поломал", "разобрался",
+    "ошибка на дисплее", "ошибка экран", "код ошибки",
+    "неисправн", "неполадк", "не функционирует",
+    # Кофемашины — частая тема сервиса
+    "кофемашина не", "кофемашины не", "паровик", "автомат не",
+    "запасн", "запчаст", "замени деталь", "поменять деталь",
+    # Запросы про мастера/техника
+    "мастер прие", "мастер вые", "техник прие", "техник вые",
+    "прислать мастер", "прислать техник",
+    # Явные команды-вопросы про систему
+    "как подать заявк", "как заявку", "куда заявк",
+    "как сообщить о ремонт", "куда обратиться", "куда писать",
+    "приложение сервис", "приложение мастер",
+    # Контракты сервисной службы
+    "франко", "алеф", "horeca", "хорека",
+)
+
+
+def _looks_like_service_request(text: str) -> bool:
+    t = (text or "").lower()
+    return any(kw in t for kw in SERVICE_KEYWORDS)
+
+
+# Админ-команды владельца над сервисной службой (требуют tool-use в shop_chat,
+# а НЕ выдачу плашки со ссылками). Имеют приоритет над SERVICE_KEYWORDS.
+SERVICE_ADMIN_KEYWORDS = (
+    # Перемещение/изменение существующих заявок
+    "перенеси заявк", "перемести заявк", "переместить заявк",
+    "поменяй контракт", "измени контракт",
+    # Выдача кодов
+    "выдай код", "сгенерируй код", "сделай приглашение", "code для техник",
+    "код для техник", "код для менеджер", "пригласи техник", "пригласи менеджер",
+    "сгенерируй приглашение", "выдай приглашение",
+    # Статистика
+    "покажи команду сервис", "статистика сервис", "статистика по сервис",
+    "кто работает в сервис", "сколько кодов выдано", "пользователи сервис",
+    "сводка сервис",
+    # Email-routes
+    "впредь от ", "впредь все письма", "сделай чтобы все от",
+    "запомни отправител", "email route", "email-route",
+    # Отправка ссылки
+    "скинь ссылку на приложение", "отправь ссылку на приложение",
+    "отправь @", "скинь @",
+)
+
+
+def _looks_like_service_admin_request(text: str) -> bool:
+    t = (text or "").lower()
+    return any(kw in t for kw in SERVICE_ADMIN_KEYWORDS)
+
+
+def _service_links_keyboard():
+    """Inline-кнопки со ссылками на сервисный бот @rbr_service_bot."""
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🚀 Открыть приложение",
+            url="https://t.me/rbr_service_bot/service",
+        )],
+        [InlineKeyboardButton(
+            text="🛠 Я техник",
+            url="https://t.me/rbr_service_bot?start=technician",
+        ),
+         InlineKeyboardButton(
+            text="📋 Я менеджер",
+            url="https://t.me/rbr_service_bot?start=manager",
+        )],
+        [InlineKeyboardButton(
+            text="☎️ Я клиент (подать заявку)",
+            url="https://t.me/rbr_service_bot?start=client",
+        )],
+    ])
 
 
 async def _send_long(message: Message, text: str):
@@ -203,8 +321,34 @@ async def cmd_what_you_know(message: Message):
         "• Напоминаю исполнителям в личку\n"
         "• Ищу по истории чатов по запросу @bishoprb <вопрос>\n"
         "• Эскалирую просроченные задачи постановщику\n\n"
-        "Я НЕ выдаю отчёты на конкретных людей. Я помощник, а не надзиратель."
+        "🔗 <b>Полезные команды:</b>\n"
+        "• /мои_задачи — мои открытые задачи\n"
+        "• /shop — режим магазина (поиск товаров, цены)\n"
+        "• /service (или /сервис) — ссылки на бот сервисной службы\n"
+        "• /digest — сводка по почте (если настроено)\n"
+        "• /monitor — статус uptime-мониторов\n\n"
+        "Я НЕ выдаю отчёты на конкретных людей. Я помощник, а не надзиратель.",
+        parse_mode="HTML",
     )
+
+
+@router.message(F.chat.type == "private", Command(commands=["id", "myid"]))
+async def cmd_my_id(message: Message):
+    """Показывает пользователю его telegram_id и username — нужно для приглашений в Академию."""
+    user = message.from_user
+    if not user:
+        return
+    parts = [
+        f"🪪 <b>Твой Telegram-ID:</b> <code>{user.id}</code>",
+    ]
+    if user.username:
+        parts.append(f"📛 <b>Username:</b> @{user.username}")
+    if user.first_name:
+        name = user.first_name + (f" {user.last_name}" if user.last_name else "")
+        parts.append(f"👤 <b>Имя:</b> {name}")
+    parts.append("")
+    parts.append("Перешли это сообщение тому, кто хочет добавить тебя в Roastberry Academy.")
+    await message.answer("\n".join(parts), parse_mode="HTML")
 
 
 @router.message(F.chat.type == "private", Command("мои_задачи"))
@@ -305,6 +449,54 @@ async def cmd_shop_off(message: Message):
     claude_service.reset_shop_history(message.from_user.id)
     shop_tools.clear_pending_photo(message.from_user.id)
     await message.answer("Магазин-режим сброшен.")
+
+
+# ─── Сервисная служба (отдельный бот @rbr_service_bot + Mini App) ───────────
+
+@router.message(F.chat.type == "private", Command(commands=["service", "сервис", "вызов", "заявка"]))
+async def cmd_service(message: Message):
+    """Раздаёт ссылки на сервисный бот и Mini App.
+
+    @rbr_service_bot — отдельная экосистема под сервисную службу:
+    приём заявок, диспетчеризация мастерам, акты с фото, Vision-разбор.
+    Здесь Бишоп просто выдаёт правильные ссылки в зависимости от того,
+    кто спрашивает.
+    """
+    from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup
+
+    text = (
+        "🛠 <b>Сервисная служба Roastberry</b>\n\n"
+        "Это отдельный бот для <b>приёма и обработки сервисных заявок</b> "
+        "по 5 направлениям: Франко, Алеф, Коммерч, Клиенты, HoReCa Machines.\n\n"
+        "<b>Что умеет:</b>\n"
+        "• Принимает заявки через приложение или чат\n"
+        "• Раздаёт мастерам, ставит SLA и эскалирует\n"
+        "• Собирает акты с фото\n"
+        "• Девид разбирает фото и заполняет акт автоматически\n"
+        "• Шлёт ежедневную сводку владельцу\n\n"
+        "<b>Открыть в Telegram:</b>"
+    )
+
+    kb = InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(
+            text="🚀 Открыть приложение",
+            url="https://t.me/rbr_service_bot/service",
+        )],
+        [InlineKeyboardButton(
+            text="🛠 Я техник",
+            url="https://t.me/rbr_service_bot?start=technician",
+        ),
+         InlineKeyboardButton(
+            text="📋 Я менеджер",
+            url="https://t.me/rbr_service_bot?start=manager",
+        )],
+        [InlineKeyboardButton(
+            text="☎️ Я клиент (подать заявку)",
+            url="https://t.me/rbr_service_bot?start=client",
+        )],
+    ])
+
+    await message.answer(text, reply_markup=kb, parse_mode="HTML")
 
 
 # ─── Gmail-ассистент ────────────────────────────────────────────────────────
@@ -423,6 +615,182 @@ async def cmd_digest(message: Message):
     await _send_long(message, text)
 
 
+@router.message(F.chat.type == "private", Command(commands=["health", "checks", "статус"]))
+async def cmd_health(message: Message):
+    """Сводный статус бизнес-чеков (каталог, Девид, …)."""
+    if message.from_user and message.from_user.id != settings.owner_telegram_id:
+        return
+    from services.business_health import get_status_snapshot
+    text = await get_status_snapshot()
+    await message.answer(text, parse_mode="HTML", disable_web_page_preview=True)
+
+
+# ─── Cleanup state (in-memory, per-user) ────────────────────────────────────
+# Хранит последний propose: {user_id: {"uids": [...], "categories": {...}, "summary": str}}
+_CLEANUP_PENDING: dict[int, dict] = {}
+
+
+@router.message(F.chat.type == "private", Command(commands=["cleanup", "почистить", "уборка"]))
+async def cmd_cleanup(message: Message):
+    """Управление чисткой почты. Подкоманды:
+        /cleanup            — то же что propose
+        /cleanup propose [дней]      — предложить что почистить (без действий)
+        /cleanup confirm archive     — архивировать предложенное (убрать из INBOX)
+        /cleanup confirm trash       — переместить в корзину (восст. 30 дней)
+        /cleanup cancel              — забыть последнее предложение
+    """
+    if message.from_user and message.from_user.id != settings.owner_telegram_id:
+        return
+    if not settings.gmail_user or not settings.gmail_app_password:
+        await message.answer("Gmail не настроен (см. /inbox)")
+        return
+
+    parts = (message.text or "").split()
+    sub = parts[1].lower() if len(parts) > 1 else "propose"
+    user_id = message.from_user.id
+
+    if sub == "cancel":
+        if user_id in _CLEANUP_PENDING:
+            del _CLEANUP_PENDING[user_id]
+            await message.answer("✅ Предложение отменено.")
+        else:
+            await message.answer("Нечего отменять.")
+        return
+
+    if sub == "confirm":
+        action = parts[2].lower() if len(parts) > 2 else None
+        if action not in ("archive", "trash"):
+            await message.answer(
+                "Использование:\n"
+                "<code>/cleanup confirm archive</code> — убрать из INBOX (восстановимо)\n"
+                "<code>/cleanup confirm trash</code> — в корзину (на 30 дней)",
+                parse_mode="HTML",
+            )
+            return
+        pending = _CLEANUP_PENDING.get(user_id)
+        if not pending:
+            await message.answer(
+                "❌ Сначала сделай <code>/cleanup propose</code> — увидишь что Бишеп предлагает почистить.",
+                parse_mode="HTML",
+            )
+            return
+        uids = pending["uids"]
+        if not uids:
+            await message.answer("В предложении ничего не было.")
+            return
+        from services.gmail_tools import GmailService
+        gm = GmailService(settings.gmail_user, settings.gmail_app_password)
+        status_msg = await message.answer(f"⏳ Применяю «{action}» к {len(uids)} письмам…")
+        try:
+            if action == "archive":
+                n = await gm.archive(uids)
+                what = "Архивировано (убрано из INBOX)"
+            else:
+                n = await gm.trash(uids)
+                what = "В корзину (восстановимо 30 дней)"
+        except Exception as e:
+            log.exception("cleanup confirm failed")
+            await status_msg.edit_text(f"❌ Ошибка: {type(e).__name__}: {str(e)[:200]}")
+            return
+        del _CLEANUP_PENDING[user_id]
+        await status_msg.edit_text(
+            f"✅ <b>{what}</b>: {n} писем\n\n"
+            f"<i>Восстановить можно из «Архив» или «Корзина» в Gmail.</i>",
+            parse_mode="HTML",
+        )
+        return
+
+    if sub == "propose" or sub.isdigit():
+        # /cleanup 14 (без 'propose') — тоже считаем propose
+        try:
+            since_days = int(parts[2]) if (len(parts) > 2 and sub == "propose") else (
+                int(sub) if sub.isdigit() else 7
+            )
+        except ValueError:
+            since_days = 7
+        since_days = max(1, min(since_days, 30))
+
+        from services.gmail_tools import GmailService
+        from services.gmail_classifier import classify_messages, CATEGORIES
+
+        status_msg = await message.answer(f"⏳ Анализирую почту за {since_days} дней…")
+        gm = GmailService(settings.gmail_user, settings.gmail_app_password)
+        try:
+            msgs = await gm.list_recent(limit=300, since_days=since_days)
+        except Exception as e:
+            await status_msg.edit_text(f"❌ Ошибка: {type(e).__name__}: {str(e)[:200]}")
+            return
+        if not msgs:
+            await status_msg.edit_text("Писем нет, чистить нечего.")
+            return
+
+        classes = await classify_messages(msgs)
+        cleanup_categories = ("promo", "spam", "service")
+        by_cat: dict[str, list] = {c: [] for c in cleanup_categories}
+        cleanup_uids: list[str] = []
+        for m, c in zip(msgs, classes):
+            if c.category not in by_cat:
+                continue
+            # Whitelist — никогда не трогаем
+            if m.is_whitelisted:
+                continue
+            by_cat[c.category].append((m, c))
+            cleanup_uids.append(m.uid)
+
+        total = sum(len(v) for v in by_cat.values())
+        if total == 0:
+            await status_msg.edit_text(
+                f"✅ Чистить нечего — за {since_days} дн нет промо/спама/уведомлений."
+            )
+            return
+
+        lines = [
+            f"🧹 <b>Можно почистить</b> · за {since_days} дн",
+            f"<i>Всего: {total} писем</i> (whitelist-отправители исключены автоматически)",
+            "",
+        ]
+        for cat in cleanup_categories:
+            items = by_cat[cat]
+            if not items:
+                continue
+            emo, label = CATEGORIES[cat]
+            lines.append(f"<b>{emo} {label}: {len(items)}</b>")
+            for m, c in items[:5]:
+                sender = (m.from_name or m.from_email)[:30].replace("<", "&lt;").replace(">", "&gt;")
+                subj = (m.subject or "(без темы)")[:50].replace("<", "&lt;").replace(">", "&gt;")
+                lines.append(f"  • {sender} — {subj}")
+            if len(items) > 5:
+                lines.append(f"  <i>… ещё {len(items) - 5}</i>")
+            lines.append("")
+
+        lines.append(
+            "👉 <b>Что дальше:</b>\n"
+            "<code>/cleanup confirm archive</code> — убрать из INBOX (остаются в Архиве, восстановимо)\n"
+            "<code>/cleanup confirm trash</code> — в корзину (восстановимо 30 дней)\n"
+            "<code>/cleanup cancel</code> — забыть это предложение"
+        )
+
+        # Сохраняем pending
+        _CLEANUP_PENDING[user_id] = {
+            "uids": cleanup_uids,
+            "since_days": since_days,
+            "total": total,
+        }
+
+        await status_msg.delete()
+        await _send_long(message, "\n".join(lines))
+        return
+
+    await message.answer(
+        "Использование:\n"
+        "<code>/cleanup [дней]</code> — что можно почистить\n"
+        "<code>/cleanup confirm archive</code> — архивировать\n"
+        "<code>/cleanup confirm trash</code> — в корзину\n"
+        "<code>/cleanup cancel</code> — отменить",
+        parse_mode="HTML",
+    )
+
+
 # ─── Uptime-мониторинг ──────────────────────────────────────────────────────
 
 @router.message(F.chat.type == "private", Command(commands=["monitor", "monitors", "монитор"]))
@@ -535,12 +903,62 @@ async def handle_private_text(message: Message, bot: Bot):
 
     is_owner = message.from_user.id == settings.owner_telegram_id
 
-    # Магазин-режим — для владельца. Также для всех если активна история или есть keywords.
-    # Gmail-вопросы (только для владельца) идут в этот же режим: shop_chat теперь
-    # содержит и gmail_chat_tools, поэтому Claude сам выберет правильный инструмент.
+    # ─── Двухступенчатый роутинг намерений ───────────────────────────────
+    # 1) Быстрый keyword-detector — почти бесплатно
+    # 2) Claude Haiku-классификатор как fallback (если keyword не сработал)
     has_shop_history = claude_service.has_active_shop_history(message.from_user.id)
-    gmail_intent = is_owner and _looks_like_gmail_request(message.text)
-    if has_shop_history or _looks_like_shop_request(message.text) or gmail_intent:
+    has_price_history = claude_service.has_active_price_history(message.from_user.id)
+
+    kw_service_admin = is_owner and _looks_like_service_admin_request(message.text)
+    kw_service = _looks_like_service_request(message.text)
+    kw_shop = _looks_like_shop_request(message.text)
+    kw_price = _looks_like_price_request(message.text)
+    kw_gmail = is_owner and _looks_like_gmail_request(message.text)
+
+    # Если ни один keyword не сработал и нет активной истории — спросим Claude.
+    intent = None
+    if not (kw_service or kw_shop or kw_price or kw_gmail or kw_service_admin
+            or has_shop_history or has_price_history):
+        if 5 <= len(message.text) <= 250:
+            try:
+                intent = await claude_service.classify_intent(message.text)
+            except Exception as e:
+                log.warning(f"classify_intent error: {e}")
+
+    # Админ-команды над сервисом (только владелец) идут в shop_chat —
+    # там tool-use с service_move_call/issue_code/users_stats/email_route.
+    # Имеет приоритет над плашкой SERVICE.
+    if kw_service_admin:
+        try:
+            answer, photos = await claude_service.shop_chat(
+                message.text, message.from_user.id, is_owner=is_owner,
+            )
+        except Exception as e:
+            log.exception("shop_chat (service-admin) error: %s", e)
+            answer, photos = f"Ошибка: {e}", []
+        if photos:
+            await _send_shop_photos(message, photos)
+        if answer:
+            await _send_long(message, answer)
+        return
+
+    # Сервис — самый высокий приоритет (не пускает в магазин/прайс ни одно
+    # упоминание ремонта).
+    if kw_service or intent == "SERVICE":
+        await message.answer(
+            "🛠 <b>Сервисная служба Roastberry</b>\n\n"
+            "Это отдельный бот: приём заявок, мастера, акты с фото, статистика.\n"
+            "Открывай через ссылки ниже — они уже зашиты под нужную роль.",
+            reply_markup=_service_links_keyboard(),
+            parse_mode="HTML",
+        )
+        return
+
+    # Магазин / курсы / Gmail — все идут в shop_chat (там Claude tool-use
+    # сам выбирает что делать).
+    gmail_intent = kw_gmail or intent == "GMAIL"
+    if (has_shop_history or kw_shop or gmail_intent
+            or intent == "SHOP"):
         try:
             answer, photos = await claude_service.shop_chat(
                 message.text, message.from_user.id, is_owner=is_owner,
@@ -555,8 +973,7 @@ async def handle_private_text(message: Message, bot: Bot):
         return
 
     # Прайс-режим. Owner — полный доступ; остальные — только просмотр.
-    has_history = claude_service.has_active_price_history(message.from_user.id)
-    if has_history or _looks_like_price_request(message.text):
+    if has_price_history or kw_price or intent == "PRICE":
         try:
             answer, files = await claude_service.price_chat(
                 message.text,
@@ -584,9 +1001,23 @@ async def handle_private_text(message: Message, bot: Bot):
         )
 
         if not tasks:
-            await message.answer(
-                "У тебя нет открытых задач. Если нужна помощь — напиши /что_ты_знаешь."
-            )
+            # Свободный диалог через Claude — Бишоп умеет отвечать на общие
+            # вопросы про Roastberry, переадресует на нужные команды.
+            answer = ""
+            try:
+                answer = await claude_service.general_chat(
+                    message.text,
+                    message.from_user.id,
+                    is_owner=is_owner,
+                )
+            except Exception as e:
+                log.error(f"general_chat failed: {e}")
+            if not answer:
+                answer = (
+                    "У тебя нет открытых задач. Если нужна помощь — "
+                    "напиши /что_ты_знаешь."
+                )
+            await _send_long(message, answer)
             return
 
         tasks_info = [
