@@ -418,6 +418,136 @@ async def handle_private_photo(message: Message, bot: Bot):
         await _send_long(message, answer)
 
 
+@router.message(F.chat.type == "private", F.document)
+async def handle_private_document(message: Message, bot: Bot):
+    """Принимаем xlsx-документы. По имени файла маршрутизируем:
+    - 'Прайс и остатки' / 'остатки' → копируем в BOT_TG, запускаем stocks_sync + shop_publish
+    - всё остальное — пока не знаем, отвечаем подсказкой.
+    """
+    if message.from_user.id not in settings.shop_admin_id_set:
+        await message.answer("Файлы для магазина принимаю только от админов.")
+        return
+
+    doc = message.document
+    fname = (doc.file_name or "").strip()
+    fname_low = fname.lower()
+    if not fname_low.endswith(".xlsx"):
+        await message.answer(f"Принимаю только .xlsx (а это {doc.mime_type or 'неизвестный формат'}).")
+        return
+
+    # Скачиваем в локальный путь TG-BOT под именем которое ждёт скрипт
+    import shutil, subprocess
+    from pathlib import Path
+
+    looks_like_shop = (
+        "остатк" in fname_low or "прайс" in fname_low or "ведомост" in fname_low
+        or "stock" in fname_low or "price" in fname_low
+    )
+    if not looks_like_shop:
+        await message.answer(
+            f"📎 Получил <b>{fname}</b>, но не понял что это.\n"
+            f"Жду xlsx где в имени есть «прайс», «остатки» или «ведомость».",
+            parse_mode="HTML",
+        )
+        return
+
+    # Скачиваем во временный файл, потом по содержимому решаем куда сохранить.
+    try:
+        file = await bot.get_file(doc.file_id)
+        buf = await bot.download_file(file.file_path)
+        data = buf.read() if hasattr(buf, "read") else bytes(buf)
+    except Exception as e:
+        log.exception("xlsx download failed")
+        await message.answer(f"❌ Не смог скачать файл: {e}")
+        return
+
+    tmp = Path("/tmp/bishop_inbound.xlsx")
+    tmp.write_bytes(data)
+
+    # Определяем тип по заголовку первой страницы
+    file_kind = "unknown"
+    try:
+        import openpyxl
+        wb = openpyxl.load_workbook(tmp, data_only=True, read_only=True)
+        ws = wb[wb.sheetnames[0]]
+        header_cells = []
+        for r in range(1, 6):
+            for c in range(1, 6):
+                v = ws.cell(r, c).value
+                if v: header_cells.append(str(v).lower())
+        header = " | ".join(header_cells)
+        if "ведомост" in header or "по товарам на склад" in header:
+            file_kind = "stocks"
+        elif "прайс" in header or "базовый прайс" in header:
+            file_kind = "price"
+    except Exception as e:
+        log.warning(f"xlsx introspect failed: {e}")
+
+    if file_kind == "stocks":
+        target = Path("/root/projects/ai-agents-rb/BOT_TG/Ведомость остатков.xlsx")
+        kind_label = "ведомость остатков"
+    elif file_kind == "price":
+        target = Path("/root/projects/ai-agents-rb/BOT_TG/Прайс и остатки.xlsx")
+        kind_label = "прайс-лист"
+    else:
+        # fallback по имени
+        if "ведомост" in fname_low:
+            target = Path("/root/projects/ai-agents-rb/BOT_TG/Ведомость остатков.xlsx")
+            kind_label = "ведомость остатков (по имени файла)"
+        else:
+            target = Path("/root/projects/ai-agents-rb/BOT_TG/Прайс и остатки.xlsx")
+            kind_label = "прайс-лист (по умолчанию)"
+
+    if target.exists():
+        shutil.copy2(target, target.with_suffix(".xlsx.bak"))
+    target.write_bytes(data)
+    await message.answer(
+        f"📥 Сохранил как <b>{kind_label}</b>: <code>{target.name}</code> ({len(data)//1024} КБ). Запускаю синк…",
+        parse_mode="HTML",
+    )
+
+    # Запускаем sync_prices_stocks.py
+    venv_py = "/root/projects/ai-agents-rb/bishoprb-agent/.venv/bin/python"
+    try:
+        result = subprocess.run(
+            [venv_py, "sync_prices_stocks.py"],
+            cwd="/root/projects/ai-agents-rb/BOT_TG",
+            capture_output=True, text=True, timeout=120,
+        )
+    except subprocess.TimeoutExpired:
+        await message.answer("⏰ Скрипт синка таймаутнул (120 сек).")
+        return
+
+    out = (result.stdout or "")[-2500:]
+    err = (result.stderr or "")[-500:]
+    status_emoji = "✅" if result.returncode == 0 else "⚠️"
+    msg_lines = [f"{status_emoji} <b>Синк остатков</b> (rc={result.returncode})", "<pre>", out.strip()[-2000:], "</pre>"]
+    if err.strip():
+        msg_lines.append(f"<i>stderr: {err.strip()[-300:]}</i>")
+    await message.answer("\n".join(msg_lines), parse_mode="HTML")
+
+    if result.returncode != 0:
+        return
+
+    # Если в выводе сказано «обновлены» хоть что-то ≠ 0 — пушим. Иначе сообщаем.
+    import re as _re
+    m_pr = _re.search(r"Цены обновлены:\s*(\d+)", out or "")
+    n_st = sum(int(x) for x in _re.findall(r"Остатки обновлены:\s*(\d+)", out or ""))
+    n_pr = int(m_pr.group(1)) if m_pr else 0
+    if n_pr == 0 and n_st == 0:
+        await message.answer("ℹ️ Изменений в products.json нет — данные xlsx уже совпадают с TMA. Пушить нечего.")
+        return
+
+    # Пушим через shop_tools.shop_publish
+    try:
+        from services.shop_tools import shop_publish
+        publish_result = shop_publish(comment=f"Синк из xlsx: {fname}")
+        await message.answer(f"🚀 Опубликовано в TG-BOT.\n<pre>{publish_result[-1500:]}</pre>", parse_mode="HTML")
+    except Exception as e:
+        log.exception("shop_publish failed")
+        await message.answer(f"⚠️ Синк прошёл, но публикация упала: {e}")
+
+
 @router.message(F.chat.type == "private", Command(commands=["shop", "магазин"]))
 async def cmd_shop(message: Message):
     claude_service.reset_shop_history(message.from_user.id)
@@ -613,6 +743,23 @@ async def cmd_digest(message: Message):
     text = format_digest(msgs, classes, period_label=period_label)
     await status_msg.delete()
     await _send_long(message, text)
+
+
+@router.message(F.chat.type == "private", Command(commands=["orders", "заказы", "магазин_сводка"]))
+async def cmd_orders_digest(message: Message, bot: Bot):
+    """Сводка по заказам магазина за сутки (только владелец)."""
+    if message.from_user and message.from_user.id != settings.owner_telegram_id:
+        return
+    from services.shop_digest import fetch_sync_snapshot, build_digest_text
+    snapshot = await fetch_sync_snapshot()
+    if snapshot is None:
+        await message.answer(
+            "⚠️ Не удалось получить данные TG-BOT (/sync). "
+            "Проверь TG_BOT_URL и TG_BOT_API_TOKEN в .env Bishop."
+        )
+        return
+    text = build_digest_text(snapshot, since_hours=24)
+    await message.answer(text[:4000], parse_mode="HTML")
 
 
 @router.message(F.chat.type == "private", Command(commands=["health", "checks", "статус"]))
