@@ -12,3 +12,6 @@ openpyxl==3.1.5
 reportlab==4.2.5
 # Для catalog_lookup — парсинг Roastberry_Каталог_2026.pdf
 pdfplumber==0.11.9
+requests==2.32.3
+openai==1.51.0
+Pillow==10.4.0
