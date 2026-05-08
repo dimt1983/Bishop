@@ -11,10 +11,17 @@ import sys
 from pathlib import Path
 
 PRICES_DIR = Path("/root/projects/ai-agents-rb/Прайсы")
-if str(PRICES_DIR) not in sys.path:
-    sys.path.insert(0, str(PRICES_DIR))
 
-import assortment_manager as am  # noqa: E402
+am = None
+
+def _get_am():
+    global am
+    if am is None:
+        if str(PRICES_DIR) not in sys.path:
+            sys.path.insert(0, str(PRICES_DIR))
+        import assortment_manager as _am  # noqa: E402
+        am = _am
+    return am
 
 
 # ─── Tool-определения для Anthropic API ────────────────────────────────────
@@ -65,7 +72,7 @@ _TOOL_COEFFS = {
 
 _TOOL_SEND_CATALOG = {
     "name": "assortment_send_catalog",
-    "description": "Прислать каталог чая (PDF с картинками и описаниями) в Telegram. kind=tea_all — сводный по всем брендам; kind=althaus / niktea — отдельный по бренду. Используй когда просят «пришли каталог чая», «скинь каталог Althaus», «пришли каталог Niktea». Для каталога кофе используй price_send_file (kind=catalog).",
+    "description": "Прислать каталог чая (PDF с картинками и описаниями) в Telegr_get_am(). kind=tea_all — сводный по всем брендам; kind=althaus / niktea — отдельный по бренду. Используй когда просят «пришли каталог чая», «скинь каталог Althaus», «пришли каталог Niktea». Для каталога кофе используй price_send_file (kind=catalog).",
     "input_schema": {
         "type": "object",
         "properties": {
@@ -203,7 +210,7 @@ def _format_row_public(p: dict) -> str:
 
 
 def _tool_show(inp: dict, *, owner: bool) -> str:
-    positions, _ = am.load_assortment()
+    positions, _ = _get_am().load_assortment()
     rows = positions
     if inp.get("brand"):
         b = inp["brand"].lower()
@@ -220,7 +227,7 @@ def _tool_show(inp: dict, *, owner: bool) -> str:
 
 
 def _tool_search(inp: dict, *, owner: bool) -> str:
-    positions, _ = am.load_assortment()
+    positions, _ = _get_am().load_assortment()
     q = (inp.get("query") or "").lower().strip()
     if not q:
         return "Пустой запрос."
@@ -235,13 +242,13 @@ def _tool_search(inp: dict, *, owner: bool) -> str:
 
 
 def _tool_calc(inp: dict) -> str:
-    _, coeffs = am.load_assortment()
-    res = am.calc_basic_price(float(inp["supply_rub"]), inp["brand"], coeffs)
+    _, coeffs = _get_am().load_assortment()
+    res = _get_am().calc_basic_price(float(inp["supply_rub"]), inp["brand"], coeffs)
     return json.dumps(res, ensure_ascii=False)
 
 
 def _tool_coeffs() -> str:
-    _, coeffs = am.load_assortment()
+    _, coeffs = _get_am().load_assortment()
     lines = [f"{'Бренд':<32} {'n':>4} {'медиана':>8} {'мин':>6} {'макс':>6}"]
     lines.append("-" * 60)
     for brand, info in sorted(coeffs.items()):
