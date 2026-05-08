@@ -85,6 +85,68 @@ _TOOL_SEND_APP_LINK = {
 }
 
 
+_TOOL_MOVE_CALL = {
+    "name": "service_move_call",
+    "description": (
+        "Переместить существующую заявку сервиса в другой контракт "
+        "(например когда Девид ошибся при классификации email — определил "
+        "Франко в HORECA). По дефолту запоминает отправителя email чтобы "
+        "следующие письма от того же домена сразу попадали в правильный "
+        "контракт.\n\n"
+        "Используй когда Дмитрий говорит:\n"
+        "  – «перенеси заявку #N в Франко / в Алеф»\n"
+        "  – «исправь контракт у заявки 12, это Франко»\n"
+        "  – «впредь письма от franco.ru — в Франко»"
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "call_id": {"type": "integer"},
+            "contract_code": {
+                "type": "string",
+                "enum": ["FRANCO", "ALEF", "HORECA", "COMMERCIAL", "CLIENTS"],
+            },
+            "remember_sender": {
+                "type": "boolean",
+                "description": "Запомнить отправителя email (true по умолчанию).",
+            },
+        },
+        "required": ["call_id", "contract_code"],
+    },
+}
+
+
+_TOOL_EMAIL_ROUTE = {
+    "name": "service_email_route",
+    "description": (
+        "Создать правило: письма содержащие подстроку pattern в адресе "
+        "отправителя автоматически попадают в указанный контракт сервиса. "
+        "Используй когда Дмитрий говорит «впредь от franco.ru — в Франко» "
+        "или «сделай чтобы все от @aleftrade.ru шли в Алеф»."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "pattern": {
+                "type": "string",
+                "description": "Подстрока для match по From (домен или адрес), например 'franco.ru' или 'service@coffee.ru'",
+            },
+            "contract_code": {
+                "type": "string",
+                "enum": ["FRANCO", "ALEF", "HORECA", "COMMERCIAL", "CLIENTS"],
+            },
+            "kind": {
+                "type": "string",
+                "enum": ["repair", "install", "uninstall", "inspection"],
+                "description": "Опциональный тип заявки если домен всегда шлёт один тип",
+            },
+            "note": {"type": "string"},
+        },
+        "required": ["pattern", "contract_code"],
+    },
+}
+
+
 _TOOL_USERS_STATS = {
     "name": "service_users_stats",
     "description": (
@@ -103,7 +165,13 @@ _TOOL_USERS_STATS = {
 }
 
 
-TOOLS_OWNER = [_TOOL_ISSUE_CODE, _TOOL_SEND_APP_LINK, _TOOL_USERS_STATS]
+TOOLS_OWNER = [
+    _TOOL_ISSUE_CODE,
+    _TOOL_SEND_APP_LINK,
+    _TOOL_USERS_STATS,
+    _TOOL_MOVE_CALL,
+    _TOOL_EMAIL_ROUTE,
+]
 TOOLS_READONLY = []
 
 
@@ -307,6 +375,69 @@ async def _tool_users_stats(inp: dict) -> str:
     return "\n".join(lines)
 
 
+async def _tool_move_call(inp: dict) -> str:
+    if not ADMIN_TOKEN:
+        return "❌ ADMIN_API_TOKEN не задан"
+    payload = {
+        "call_id": int(inp.get("call_id") or 0),
+        "contract_code": (inp.get("contract_code") or "").upper(),
+        "remember_sender": bool(inp.get("remember_sender", True)),
+    }
+    if not payload["call_id"] or not payload["contract_code"]:
+        return "❌ Нужны call_id и contract_code"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{DAVID_BASE_URL.rstrip('/')}/admin/service/move_call_contract",
+                headers={"X-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"},
+                json=payload,
+            )
+            data = r.json()
+    except Exception as e:
+        return f"❌ Не получилось обратиться к David'у: {e}"
+    if not data.get("ok"):
+        return f"❌ Ошибка: {data}"
+    parts = [
+        f"✅ Заявка #{data['moved_call_id']} перемещена в <b>{data['new_contract']}</b>"
+    ]
+    if data.get("route_added_for_pattern"):
+        parts.append(
+            f"📌 Запомнил отправителя: впредь письма с <code>{data['route_added_for_pattern']}</code> "
+            f"автоматически в {data['new_contract']}"
+        )
+    return "\n".join(parts)
+
+
+async def _tool_email_route(inp: dict) -> str:
+    if not ADMIN_TOKEN:
+        return "❌ ADMIN_API_TOKEN не задан"
+    payload = {
+        "pattern": (inp.get("pattern") or "").strip().lower(),
+        "contract_code": (inp.get("contract_code") or "").upper(),
+        "kind": inp.get("kind"),
+        "note": inp.get("note") or "",
+    }
+    if not payload["pattern"] or not payload["contract_code"]:
+        return "❌ Нужны pattern и contract_code"
+    try:
+        async with httpx.AsyncClient(timeout=15) as client:
+            r = await client.post(
+                f"{DAVID_BASE_URL.rstrip('/')}/admin/service/email_route",
+                headers={"X-Admin-Token": ADMIN_TOKEN, "Content-Type": "application/json"},
+                json=payload,
+            )
+            data = r.json()
+    except Exception as e:
+        return f"❌ Не получилось обратиться к David'у: {e}"
+    if not data.get("ok"):
+        return f"❌ Ошибка: {data}"
+    return (
+        f"✅ Правило сохранено (id={data['route_id']}):\n"
+        f"  Письма от <code>{payload['pattern']}</code> → <b>{payload['contract_code']}</b>"
+        + (f" ({payload['kind']})" if payload.get("kind") else "")
+    )
+
+
 async def execute(name: str, inp: dict, owner_tg_id: int = 0) -> str:
     """Точка входа из claude_service.py для tool-use."""
     if name == "service_issue_invite_code":
@@ -315,4 +446,8 @@ async def execute(name: str, inp: dict, owner_tg_id: int = 0) -> str:
         return await _tool_send_app_link(inp)
     if name == "service_users_stats":
         return await _tool_users_stats(inp)
+    if name == "service_move_call":
+        return await _tool_move_call(inp)
+    if name == "service_email_route":
+        return await _tool_email_route(inp)
     return f"❌ Unknown service-tool: {name}"
