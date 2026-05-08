@@ -9,10 +9,17 @@ from datetime import date
 from pathlib import Path
 
 PRICES_DIR = Path("/root/projects/ai-agents-rb/Прайсы")
-if str(PRICES_DIR) not in sys.path:
-    sys.path.insert(0, str(PRICES_DIR))
 
-import price_manager as pm  # noqa: E402
+pm = None  # ленивая загрузка — см. _get_pm()
+
+def _get_pm():
+    global pm
+    if pm is None:
+        if str(PRICES_DIR) not in sys.path:
+            sys.path.insert(0, str(PRICES_DIR))
+        import price_manager as _pm  # noqa: E402
+        pm = _pm
+    return pm
 
 
 # ─── Tool definitions для Anthropic API ─────────────────────────────────────
@@ -124,7 +131,7 @@ TOOLS_OWNER = [_TOOL_SHOW, _TOOL_CALC, _TOOL_ADD, _TOOL_REMOVE, _TOOL_SEND_FILE_
 TOOLS_READONLY = [_TOOL_SHOW, _TOOL_SEND_FILE_PUBLIC]
 TOOLS = TOOLS_OWNER  # обратная совместимость
 
-# Карта файлов чистовиков → формат → имя файла. Базовая директория — pm.OUTPUT_DIR.
+# Карта файлов чистовиков → формат → имя файла. Базовая директория — _get_pm().OUTPUT_DIR.
 _FILES = {
     "price":     {"pdf": "Roastberry_Прайс_2026.pdf",   "xlsx": "Roastberry_Прайс_2026.xlsx"},
     "catalog":   {"pdf": "Roastberry_Каталог_2026.pdf"},
@@ -170,7 +177,7 @@ def _calc_payload(name: str, ptype: str, green_usd: float, p: dict) -> dict:
 
 
 def _tool_show() -> str:
-    main = pm.collect_main()
+    main = _get_pm().collect_main()
     lines = [f"Всего позиций: {len(main)}\n"]
     for r in main:
         tag = "🆕 " if r["is_new"] else ""
@@ -183,7 +190,7 @@ def _tool_show() -> str:
 
 def _tool_calculate(inp: dict) -> str:
     green_usd, components = _resolve_green_usd(inp)
-    p = pm.calculate(green_usd, ptype=inp["type"])
+    p = _get_pm().calculate(green_usd, ptype=inp["type"])
     payload = _calc_payload(inp["name"], inp["type"], green_usd, p)
     if components:
         payload["components"] = components
@@ -192,9 +199,9 @@ def _tool_calculate(inp: dict) -> str:
 
 def _tool_add(inp: dict) -> str:
     green_usd, components = _resolve_green_usd(inp)
-    p = pm.calculate(green_usd, ptype=inp["type"])
+    p = _get_pm().calculate(green_usd, ptype=inp["type"])
 
-    positions = pm.load_positions()
+    positions = _get_pm().load_positions()
     positions = [pp for pp in positions if pp["name"] != inp["name"]]
     positions.append({
         "name": inp["name"],
@@ -203,7 +210,7 @@ def _tool_add(inp: dict) -> str:
         "components": components,
         "added": date.today().isoformat(),
     })
-    pm.save_positions(positions)
+    _get_pm().save_positions(positions)
 
     # roast → tags в metadata.json. Бленды получают префикс B (BF/BE).
     roast = inp.get("roast") or []
@@ -211,7 +218,7 @@ def _tool_add(inp: dict) -> str:
         ptype = inp["type"]
         prefix = "B" if ptype.startswith("blend") else ""
         tags = [f"{prefix}{r}" for r in roast]
-        meta = pm.load_metadata()
+        meta = _get_pm().load_metadata()
         existing = meta.get(inp["name"], {})
         meta[inp["name"]] = {
             "name": inp["name"],
@@ -221,20 +228,20 @@ def _tool_add(inp: dict) -> str:
             "description": existing.get("description", ""),
             "q_score": existing.get("q_score"),
         }
-        pm.save_metadata(meta)
+        _get_pm().save_metadata(meta)
 
-    pm.cmd_export(None)
+    _get_pm().cmd_export(None)
 
     payload = _calc_payload(inp["name"], inp["type"], green_usd, p)
     payload["status"] = "added"
-    payload["registry"] = str(pm.POSITIONS_FILE)
+    payload["registry"] = str(_get_pm().POSITIONS_FILE)
     if roast:
         payload["roast"] = roast
     return json.dumps(payload, ensure_ascii=False)
 
 
 def _tool_remove(inp: dict) -> str:
-    positions = pm.load_positions()
+    positions = _get_pm().load_positions()
     before = len(positions)
     positions = [pp for pp in positions if pp["name"] != inp["name"]]
     if len(positions) == before:
@@ -242,8 +249,8 @@ def _tool_remove(inp: dict) -> str:
             {"status": "not_found", "name": inp["name"]},
             ensure_ascii=False,
         )
-    pm.save_positions(positions)
-    pm.cmd_export(None)
+    _get_pm().save_positions(positions)
+    _get_pm().cmd_export(None)
     return json.dumps(
         {"status": "removed", "name": inp["name"]},
         ensure_ascii=False,
@@ -269,7 +276,7 @@ def _tool_send_file(inp: dict) -> str:
             {"status": "error", "error": f"format {fmt} недоступен для {kind}"},
             ensure_ascii=False,
         )
-    path = pm.OUTPUT_DIR / filename
+    path = _get_pm().OUTPUT_DIR / filename
     if not path.exists():
         return json.dumps(
             {"status": "error", "error": f"файл не найден: {filename}"},
