@@ -139,7 +139,7 @@ async def classify_messages(
             resp = await client.messages.create(
                 model="claude-haiku-4-5-20251001",
                 max_tokens=2048,
-                system=_SYSTEM,
+                system=[{"type": "text", "text": _SYSTEM, "cache_control": {"type": "ephemeral"}}],
                 messages=[{
                     "role": "user",
                     "content": "Классифицируй эти письма:\n\n" + json.dumps(payload, ensure_ascii=False),

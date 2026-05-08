@@ -28,6 +28,18 @@ client = AsyncAnthropic(
 TZ = ZoneInfo(settings.timezone)
 
 
+def _cached_system(text: str) -> list[dict]:
+    return [{"type": "text", "text": text, "cache_control": {"type": "ephemeral"}}]
+
+
+def _cache_last_tool(tools: list[dict]) -> list[dict]:
+    if not tools:
+        return tools
+    result = list(tools)
+    result[-1] = {**result[-1], "cache_control": {"type": "ephemeral"}}
+    return result
+
+
 # Многошаговый прайс-диалог: храним последние сообщения owner'а в памяти процесса.
 # При рестарте бота история теряется — это ок, пользователь начнёт новый диалог.
 _PRICE_HISTORY: dict[int, list[dict]] = {}
@@ -164,8 +176,8 @@ async def _run_price_loop(
             response = await client.messages.create(
                 model=settings.claude_model,
                 max_tokens=2048,
-                system=system,
-                tools=tools,
+                system=_cached_system(system),
+                tools=_cache_last_tool(tools),
                 messages=history,
             )
         except Exception as e:
@@ -543,8 +555,8 @@ async def _run_shop_loop(
             response = await client.messages.create(
                 model=settings.claude_model,
                 max_tokens=2048,
-                system=system,
-                tools=tools,
+                system=_cached_system(system),
+                tools=_cache_last_tool(tools),
                 messages=history,
             )
         except Exception as e:
@@ -942,7 +954,7 @@ async def classify_intent(text: str, timeout: float = 3.5) -> str:
             client.messages.create(
                 model=INTENT_MODEL,
                 max_tokens=10,
-                system=INTENT_SYSTEM,
+                system=_cached_system(INTENT_SYSTEM),
                 messages=[{"role": "user", "content": text[:500]}],
             ),
             timeout=timeout,
@@ -1025,16 +1037,16 @@ async def general_chat(
     if len(history) > _GENERAL_HISTORY_LIMIT * 2:
         history[:] = history[-_GENERAL_HISTORY_LIMIT * 2:]
 
-    system = GENERAL_SYSTEM
+    system_blocks = [{"type": "text", "text": GENERAL_SYSTEM, "cache_control": {"type": "ephemeral"}}]
     if is_owner:
-        system += "\n\nПользователь — Дмитрий, владелец Roastberry."
+        system_blocks.append({"type": "text", "text": "\n\nПользователь — Дмитрий, владелец Roastberry."})
 
     try:
         response = await asyncio.wait_for(
             client.messages.create(
-                model="claude-haiku-4-5-20251001",  # быстро и недорого
+                model="claude-haiku-4-5-20251001",
                 max_tokens=400,
-                system=system,
+                system=system_blocks,
                 messages=history,
             ),
             timeout=timeout,
