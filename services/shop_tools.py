@@ -13,6 +13,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import urllib.request
 import urllib.error
 from datetime import datetime
@@ -27,6 +28,10 @@ TMA_STATIC = Path("/root/projects/ai-agents-rb/BOT_TG/tma_static")
 PRODUCTS_JSON = TMA_STATIC / "products.json"
 PHOTOS_DIR = TMA_STATIC / "photos" / "products"
 GIT_REPO = Path("/tmp/TG-BOT")
+# Источник прайса для live-merge в TMA (live_prices_api читает его из tma_static/data/).
+# Без актуального xlsx fuzzy-матчер скидывает новые позиции на старые с неверными ценами.
+BISHOP_PRICE_XLSX_SRC = Path("/root/projects/ai-agents-rb/Прайсы/чистовики/Roastberry_Прайс_2026.xlsx")
+BISHOP_PRICE_XLSX_DST_REL = "tma_static/data/Roastberry_Прайс_2026.xlsx"
 
 
 # ─── Tool definitions ───────────────────────────────────────────────────────
@@ -40,7 +45,7 @@ _TOOL_SEARCH = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Часть названия или категории. Пусто = все"},
-            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk",""], "description": "Опц. фильтр по категории"},
+            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk","consulting",""], "description": "Опц. фильтр по категории"},
             "limit": {"type": "integer", "description": "Макс. результатов", "default": 15},
         },
     },
@@ -58,21 +63,35 @@ _TOOL_GET = {
 
 _TOOL_UPDATE_FIELD = {
     "name": "shop_update_field",
-    "description": "Обновить поле товара: price/description/stock/tags/name/country/roast/process. "
-                   "Для price указывай fasovka_size (\"200 г\"/\"1 кг\"/...) и new_price. "
-                   "Для description/name/country/roast/process — value (string). "
-                   "Для tags — список (заменяет полностью). "
-                   "Для stock — целое число.",
+    "description": (
+        "Обновить поле товара: price / description / stock / tags / name / "
+        "country / roast / process / recipe_e / recipe_f. "
+        "Для price указывай fasovka_size (\"200 г\" / \"1 кг\" / ...) и new_price. "
+        "ВНИМАНИЕ: цены кофе в TMA перетираются из xlsx-прайса при каждом запросе. "
+        "Для постоянных изменений цены кофе — правь прайс через price_add/price_remove, "
+        "не магазин. shop_update_field price имеет смысл только для позиций которых "
+        "нет в xlsx-прайсе (консалтинг, спецкарточки) или для разовых акций. "
+        "Для description / name / country / roast / process / recipe_e / recipe_f — "
+        "value (string). recipe_e и recipe_f — рецепты приготовления для эспрессо "
+        "и фильтра соответственно. "
+        "Для tags — список строк (полностью заменяет старый набор)."
+    ),
     "input_schema": {
         "type": "object",
         "properties": {
             "tma_id": {"type": "string"},
-            "field": {"type": "string", "enum": ["price","description","stock","tags","name","country","roast","process"]},
+            "field": {
+                "type": "string",
+                "enum": ["price", "description", "stock", "tags", "name",
+                         "country", "roast", "process", "recipe_e", "recipe_f",
+                         "region", "altitude", "variety", "aroma", "taste",
+                         "roast_descr", "roast_date", "batch"],
+            },
             "value": {"description": "Новое значение (тип зависит от поля)"},
             "fasovka_size": {"type": "string", "description": "Только для field=price (например '1 кг')"},
             "new_price": {"type": "number", "description": "Только для field=price"},
         },
-        "required": ["tma_id","field"],
+        "required": ["tma_id", "field"],
     },
 }
 
@@ -101,6 +120,26 @@ _TOOL_SET_PHOTO_TG = {
     },
 }
 
+_TOOL_SET_PHOTO_PENDING_PDF = {
+    "name": "shop_set_photo_from_pending_pdf",
+    "description": (
+        "Конвертировать страницу из PDF (который пользователь только что прислал "
+        "в этот же чат) в JPG и поставить как фото товара. Используй когда "
+        "Дмитрий шлёт PDF + просит «поставь как фото у X», «возьми первую "
+        "страницу как картинку для X». Если страница не указана — берём 1-ю. "
+        "Если фото уже было — заменяется. PDF удаляется из pending после применения."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tma_id": {"type": "string"},
+            "page":   {"type": "integer", "description": "Номер страницы, 1-based. По умолчанию 1."},
+            "dpi":    {"type": "integer", "description": "Разрешение рендера 72-400, по умолчанию 200."},
+        },
+        "required": ["tma_id"],
+    },
+}
+
 _TOOL_ADD = {
     "name": "shop_add_product",
     "description": "Добавить новый товар в магазин. Минимум: name, category, subcategory, fasovka [(size, price)].",
@@ -108,7 +147,7 @@ _TOOL_ADD = {
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk"]},
+            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk","consulting"]},
             "subcategory": {"type": "string", "description": "ID подкатегории (например 'tea_althaus_loose')"},
             "fasovka": {
                 "type": "array",
@@ -177,11 +216,118 @@ _TOOL_PUBLISH = {
     },
 }
 
+_TOOL_SET_PHOTO_PDF = {
+    "name": "shop_set_photo_from_pdf",
+    "description": (
+        "Извлечь страницу из PDF и поставить как фото товара. Используй "
+        "когда Дмитрий говорит «возьми картинку из этого PDF», «прикрепи "
+        "страницу 2 как фото у Кастильо» и т.п. PDF должен быть локально "
+        "(скачай через yadisk_fetch если он на Я.Диске). Страница "
+        "конвертируется в JPG и сохраняется в "
+        "tma_static/photos/products/<tma_id>.jpg, привязка к карточке "
+        "автоматическая."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tma_id": {"type": "string", "description": "ID карточки в магазине"},
+            "pdf_path": {"type": "string",
+                         "description": "Локальный абсолютный путь к PDF (после yadisk_fetch или из проекта)."},
+            "page": {"type": "integer",
+                     "description": "Номер страницы 1-based. По умолчанию 1."},
+            "dpi": {"type": "integer",
+                    "description": "Разрешение рендера, по умолчанию 200 (для качества фото)."},
+        },
+        "required": ["tma_id", "pdf_path"],
+    },
+}
+
+_TOOL_RENDER_PACKS_BULK = {
+    "name": "shop_render_packs_bulk",
+    "description": (
+        "Массово сгенерировать пакеты для всех кофейных карточек в "
+        "указанной подкатегории (например coffee_filter_microlot, "
+        "coffee_espresso_mono) или для всех coffee_espresso_*/coffee_filter_*. "
+        "Возвращает список: что отрендерилось и для каких карточек не "
+        "хватает данных. Не вызывай если Дмитрий не попросил массовую "
+        "заливку — обычно сначала тестируется одна-две через shop_render_pack."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "subcategory": {
+                "type": "string",
+                "description": "Конкретная подкатегория (coffee_filter_microlot и т.д.) "
+                               "или префикс 'coffee_espresso' / 'coffee_filter' / 'coffee'.",
+            },
+            "skip_if_photo": {
+                "type": "boolean",
+                "description": "По умолчанию true — пропускать карточки у которых уже "
+                               "есть photo (не перезаписывать существующие фото).",
+            },
+        },
+        "required": ["subcategory"],
+    },
+}
+
+_TOOL_RENDER_PACK = {
+    "name": "shop_render_pack",
+    "description": (
+        "Сгенерировать фото пакета кофе для карточки магазина — наложить на "
+        "красный (эспрессо) или зелёный (фильтр) шаблон этикетку с данными "
+        "позиции (имя, аромат, вкус, регион, высота, сорт, обработка, дата "
+        "обжарки, партия). Шаблон выбирается автоматически по подкатегории "
+        "(coffee_espresso_* → красный, coffee_filter_* → зелёный). "
+        "Если каких-то полей в карточке нет (region/altitude/variety/aroma/"
+        "taste/roast_descr) — тул вернёт status='needs_input' со списком "
+        "недостающих полей. Тогда: спроси Дмитрия, сохрани полученное через "
+        "shop_update_field, потом вызови shop_render_pack заново. "
+        "Дата обжарки автоматически = сегодняшняя если не задана. Партия по "
+        "умолчанию '1'. Готовое фото сохраняется в "
+        "tma_static/photos/products/<tma_id>.jpg и привязывается к карточке."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tma_id": {"type": "string", "description": "ID карточки в магазине"},
+            "kind": {"type": "string", "enum": ["espresso", "filter"],
+                     "description": "Опционально — переопределить шаблон. По умолчанию выводится из subcategory."},
+        },
+        "required": ["tma_id"],
+    },
+}
+
+_TOOL_CATALOG_LOOKUP = {
+    "name": "shop_catalog_lookup",
+    "description": (
+        "Найти позицию в Roastberry_Каталог_2026.pdf по имени и вернуть её "
+        "описание, теги, секцию каталога (МОНОСОРТА / МИКРОЛОТЫ BLACK EDITION / "
+        "МИКРОЛОТЫ BORЩ EDITION / СМЕСИ), Q-балл. Используй когда Дмитрий "
+        "просит «возьми описание из каталога», «заполни описание у X», "
+        "«посмотри в каталоге что про эту позицию». После получения данных — "
+        "shop_update_field для применения (description, tags, при необходимости "
+        "name)."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "name": {"type": "string", "description": "Имя позиции (как в магазине). Поиск нечёткий."},
+            "min_score": {"type": "number",
+                          "description": "Минимальная схожесть (0-1), default 0.6"},
+        },
+        "required": ["name"],
+    },
+}
+
 
 TOOLS_OWNER = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_UPDATE_FIELD,
-               _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_ADD, _TOOL_REMOVE,
-               _TOOL_SEND_PHOTO, _TOOL_PUBLISH]
-TOOLS_READONLY = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_SEND_PHOTO]
+               _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_SET_PHOTO_PENDING_PDF,
+               _TOOL_SET_PHOTO_PDF,
+               _TOOL_ADD, _TOOL_REMOVE,
+               _TOOL_SEND_PHOTO, _TOOL_PUBLISH, _TOOL_CATALOG_LOOKUP,
+               _TOOL_RENDER_PACK, _TOOL_RENDER_PACKS_BULK]
+TOOLS_READONLY = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_SEND_PHOTO,
+                  _TOOL_CATALOG_LOOKUP]
 
 
 # ─── Реализация ─────────────────────────────────────────────────────────────
@@ -259,7 +405,8 @@ def shop_update_field(tma_id: str, field: str, value=None,
         old = fa["price"]
         fa["price"] = float(new_price)
         _save(data)
-        return _to_dict_resp(True, msg=f"Цена {fasovka_size} обновлена: {old} → {new_price}")
+        return _to_dict_resp(True,
+                             msg=f"Цена {fasovka_size} обновлена: {old} → {new_price}")
     if field == "stock":
         try:
             v = int(value)
@@ -275,7 +422,10 @@ def shop_update_field(tma_id: str, field: str, value=None,
         _save(data)
         return _to_dict_resp(True, msg=f"Теги: {p['tags']}")
     # текстовые поля
-    if field in ("name", "description", "country", "roast", "process"):
+    if field in ("name", "description", "country", "roast", "process",
+                 "recipe_e", "recipe_f",
+                 "region", "altitude", "variety", "aroma", "taste",
+                 "roast_descr", "roast_date", "batch"):
         p[field] = str(value or "")
         _save(data)
         return _to_dict_resp(True, msg=f"Поле {field} обновлено")
@@ -312,6 +462,9 @@ def shop_set_photo_from_url(tma_id: str, url: str) -> str:
 
 # Контекст: pending photo bytes (передаются в shop_chat при наличии attached photo)
 _PENDING_PHOTO: dict[int, bytes] = {}
+# Контекст: pending PDF (как и фото — приходит документом, потом по команде
+# конвертируется в JPG и крепится как фото товара).
+_PENDING_PDF: dict[int, bytes] = {}
 
 
 def set_pending_photo(user_id: int, image_bytes: bytes) -> None:
@@ -320,6 +473,14 @@ def set_pending_photo(user_id: int, image_bytes: bytes) -> None:
 
 def clear_pending_photo(user_id: int) -> None:
     _PENDING_PHOTO.pop(user_id, None)
+
+
+def set_pending_pdf(user_id: int, pdf_bytes: bytes) -> None:
+    _PENDING_PDF[user_id] = pdf_bytes
+
+
+def clear_pending_pdf(user_id: int) -> None:
+    _PENDING_PDF.pop(user_id, None)
 
 
 def shop_set_photo_from_telegram(tma_id: str, _user_id: int = 0) -> str:
@@ -337,6 +498,23 @@ def shop_set_photo_from_telegram(tma_id: str, _user_id: int = 0) -> str:
     _save(data)
     clear_pending_photo(_user_id)
     return _to_dict_resp(True, msg=f"Фото из чата привязано к {tma_id}")
+
+
+def shop_set_photo_from_pending_pdf(tma_id: str, page: int = 1,
+                                    dpi: int = 200, _user_id: int = 0) -> str:
+    """Конвертирует страницу из присланного в чате PDF в JPG и ставит как фото."""
+    if _user_id not in _PENDING_PDF:
+        return _to_dict_resp(False, error="Нет приложенного PDF. Попроси пользователя прислать PDF в этом же сообщении.")
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / f"bishop_pdf_{_user_id}.pdf"
+    tmp.write_bytes(_PENDING_PDF[_user_id])
+    res = shop_set_photo_from_pdf(tma_id, str(tmp), page=page, dpi=dpi)
+    clear_pending_pdf(_user_id)
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return res
 
 
 def shop_add_product(name: str, category: str, subcategory: str,
@@ -362,6 +540,21 @@ def shop_add_product(name: str, category: str, subcategory: str,
         "fasovka": fasovka, "stock": int(stock),
         "tags": tags or [], "photo": None,
     }
+    # pair_id для микролотов — связывает 1кг (Эспрессо/Фильтр) и 200г (Блэк/Борщ)
+    # карточки одной позиции, чтоб TMA показала переключатель фасовок на детальной.
+    micro_subs = ("coffee_espresso_microlot", "coffee_filter_microlot",
+                  "coffee_black", "coffee_borshch")
+    if subcategory in micro_subs:
+        # Если уже есть карточка с тем же базовым именем в "парной" подкатегории —
+        # берём её pair_id, иначе генерируем новый по имени.
+        existing_pid = None
+        for x in data["products"]:
+            if x.get("subcategory") in micro_subs and x.get("name", "").strip().lower() == name.strip().lower():
+                if x.get("pair_id"):
+                    existing_pid = x["pair_id"]
+                    break
+        item["pair_id"] = existing_pid or _slug(name)
+
     data["products"].append(item)
     _save(data)
     return _to_dict_resp(True, msg=f"Добавлен товар: {tma_id}", tma_id=tma_id)
@@ -442,10 +635,18 @@ def shop_publish(comment: str = "Bishop: shop update") -> str:
             str(GIT_REPO / "tma_static" / "photos" / "products" / ""),
             shell=True, check=False,
         )
+        # Свежий xlsx-прайс — live_prices_api в TG-BOT читает именно его и
+        # перетирает цены кофейных карточек. Без обновления fuzzy-матч уведёт
+        # новые позиции на похожие старые.
+        if BISHOP_PRICE_XLSX_SRC.exists():
+            xlsx_dst = GIT_REPO / BISHOP_PRICE_XLSX_DST_REL
+            xlsx_dst.parent.mkdir(parents=True, exist_ok=True)
+            subprocess.run(["cp", str(BISHOP_PRICE_XLSX_SRC), str(xlsx_dst)], check=True)
 
         # 2. add + commit + push
         subprocess.run(git + ["add", "tma_static/products.json",
-                              "tma_static/photos/products/"], check=True, env=env)
+                              "tma_static/photos/products/",
+                              BISHOP_PRICE_XLSX_DST_REL], check=True, env=env)
         result = subprocess.run(git + ["status", "--short"],
                                 check=True, capture_output=True, text=True, env=env)
         if not result.stdout.strip():
@@ -475,6 +676,257 @@ def shop_publish(comment: str = "Bishop: shop update") -> str:
         return _to_dict_resp(False, error=f"Git ошибка: {e} {stderr[:300]}")
 
 
+# ── Каталог: lookup описаний/тегов из Roastberry_Каталог_2026.pdf ──
+
+CATALOG_PDF_PATH = Path(
+    "/root/projects/ai-agents-rb/Прайсы/чистовики/Roastberry_Каталог_2026.pdf"
+)
+_CATALOG_CACHE = {"data": None, "mtime": 0}
+
+
+def _load_catalog_pages() -> list[str]:
+    """Возвращает список текстов страниц PDF-каталога. Кэширует по mtime."""
+    if not CATALOG_PDF_PATH.exists():
+        return []
+    mtime = CATALOG_PDF_PATH.stat().st_mtime
+    if _CATALOG_CACHE["data"] is not None and _CATALOG_CACHE["mtime"] == mtime:
+        return _CATALOG_CACHE["data"]
+    try:
+        import pdfplumber
+    except ImportError:
+        return []
+    pages = []
+    with pdfplumber.open(CATALOG_PDF_PATH) as pdf:
+        for pg in pdf.pages:
+            pages.append(pg.extract_text() or "")
+    _CATALOG_CACHE["data"] = pages
+    _CATALOG_CACHE["mtime"] = mtime
+    return pages
+
+
+def _norm_for_search(s: str) -> str:
+    s = (s or "").lower().replace("ё", "е")
+    s = re.sub(r"[^а-яa-z0-9\s]+", " ", s)
+    s = re.sub(r"\s+", " ", s).strip()
+    return s
+
+
+def shop_catalog_lookup(name: str, min_score: float = 0.5) -> str:
+    """Ищет упоминания позиции в Roastberry_Каталог_2026.pdf.
+
+    Возвращает фрагменты текста (страница + контекст вокруг упоминания) —
+    Bishop сам выделит из них описание/рецепты/Q-балл и применит к карточке
+    через shop_update_field."""
+    pages = _load_catalog_pages()
+    if not pages:
+        return _to_dict_resp(False,
+                             error=f"Каталог не найден или пустой: {CATALOG_PDF_PATH}")
+
+    # Слова из запроса (без шумовых)
+    qwords = [w for w in _norm_for_search(name).split() if len(w) >= 3]
+    if not qwords:
+        return _to_dict_resp(False, error="Слишком короткое имя для поиска")
+
+    hits = []
+    for page_idx, text in enumerate(pages, start=1):
+        norm = _norm_for_search(text)
+        # Сколько слов из запроса встречается на этой странице
+        matched = sum(1 for w in qwords if w in norm)
+        score = matched / len(qwords)
+        if score < min_score:
+            continue
+        # Найдём первое упоминание ключевого слова и вырежем абзац вокруг (±400 символов)
+        anchor = -1
+        for w in qwords:
+            idx = norm.find(w)
+            if idx >= 0:
+                anchor = idx
+                break
+        if anchor < 0:
+            continue
+        start = max(0, anchor - 200)
+        end = min(len(text), anchor + 600)
+        snippet = text[start:end].strip()
+        hits.append({"page": page_idx, "score": round(score, 2),
+                     "snippet": snippet})
+
+    if not hits:
+        return _to_dict_resp(False,
+                             error=f"Имя '{name}' в каталоге не найдено")
+    # Отсортируем по score, вернём топ-3
+    hits.sort(key=lambda h: h["score"], reverse=True)
+    return _to_dict_resp(True,
+                         msg=f"Найдено {len(hits)} упоминаний",
+                         catalog_pdf=str(CATALOG_PDF_PATH),
+                         hits=hits[:3])
+
+
+# ── Рендер пакета (этикетка на красном/зелёном шаблоне) ──
+
+import services.pack_renderer as pack_renderer  # noqa: E402
+
+
+def shop_render_pack(tma_id: str, kind: str | None = None) -> str:
+    data = _load()
+    p = next((x for x in data["products"] if x["id"] == tma_id), None)
+    if not p:
+        return _to_dict_resp(False, error=f"Товар не найден: {tma_id}")
+
+    # Тип шаблона
+    if not kind:
+        kind = pack_renderer.kind_from_subcategory(p.get("subcategory", ""))
+    if kind not in ("espresso", "filter"):
+        return _to_dict_resp(False,
+                             error=("Шаблон не определён. Карточка должна быть в "
+                                    "coffee_espresso_* или coffee_filter_*. Для 200г "
+                                    "(coffee_black/coffee_borshch) шаблон пока не готов."),
+                             subcategory=p.get("subcategory"))
+
+    # Проверка обязательных полей
+    missing = pack_renderer.find_missing(p)
+    if missing:
+        return _to_dict_resp(
+            False,
+            status="needs_input",
+            missing=missing,
+            error=f"Не хватает полей карточки: {', '.join(missing)}. "
+                  f"Спроси у Дмитрия и сохрани через shop_update_field, "
+                  f"потом вызови shop_render_pack заново.",
+            have={k: p.get(k) for k in pack_renderer.LABEL_FIELDS if p.get(k)},
+        )
+
+    # Дата обжарки: если нет — подставляем сегодня и СОХРАНЯЕМ в карточку,
+    # чтобы при следующих рендерах она не «двигалась».
+    if not p.get("roast_date"):
+        from datetime import date
+        p["roast_date"] = date.today().strftime("%d.%m.%Y")
+    if not p.get("batch"):
+        p["batch"] = "1"
+    _save(data)
+
+    # Готовим данные и рендерим
+    label_data = pack_renderer.build_label_data(p)
+    PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+    out_path = PHOTOS_DIR / f"{tma_id}.jpg"
+    try:
+        pack_renderer.render(kind, label_data, out_path)
+    except Exception as e:
+        return _to_dict_resp(False, error=f"Ошибка рендера: {type(e).__name__}: {e}")
+
+    # Привязываем фото к карточке (как делают shop_set_photo_*)
+    p["photo"] = f"photos/products/{tma_id}.jpg"
+    _save(data)
+
+    return _to_dict_resp(
+        True,
+        msg=f"Пакет сгенерирован ({kind}): {label_data['name']}",
+        path=str(out_path),
+        kind=kind,
+        applied=label_data,
+    )
+
+
+def shop_set_photo_from_pdf(tma_id: str, pdf_path: str,
+                            page: int = 1, dpi: int = 200) -> str:
+    data = _load()
+    p = next((x for x in data["products"] if x["id"] == tma_id), None)
+    if not p:
+        return _to_dict_resp(False, error=f"Товар не найден: {tma_id}")
+
+    pdf = Path(pdf_path)
+    if not pdf.is_absolute():
+        return _to_dict_resp(False, error="pdf_path должен быть абсолютным")
+    if not pdf.is_file():
+        return _to_dict_resp(False, error=f"PDF не найден: {pdf}")
+
+    try:
+        import fitz  # PyMuPDF
+    except ImportError:
+        return _to_dict_resp(False, error="PyMuPDF не установлен")
+
+    try:
+        doc = fitz.open(str(pdf))
+    except Exception as e:
+        return _to_dict_resp(False, error=f"не удалось открыть PDF: {e}")
+
+    try:
+        page_idx = max(1, int(page)) - 1  # 1-based → 0-based
+        if page_idx >= len(doc):
+            return _to_dict_resp(False,
+                                 error=f"страница {page} вне диапазона (страниц всего {len(doc)})")
+        dpi_v = max(72, min(int(dpi or 200), 400))
+        zoom = dpi_v / 72.0
+        matrix = fitz.Matrix(zoom, zoom)
+        pix = doc[page_idx].get_pixmap(matrix=matrix, alpha=False)
+        PHOTOS_DIR.mkdir(parents=True, exist_ok=True)
+        out_path = PHOTOS_DIR / f"{tma_id}.jpg"
+        pix.save(str(out_path), jpg_quality=90)
+    finally:
+        doc.close()
+
+    p["photo"] = f"photos/products/{tma_id}.jpg"
+    _save(data)
+
+    return _to_dict_resp(True,
+                         msg=f"Страница {page} из PDF поставлена как фото",
+                         path=str(out_path),
+                         dimensions=f"{pix.width}x{pix.height}")
+
+
+def shop_render_packs_bulk(subcategory: str, skip_if_photo: bool = True) -> str:
+    data = _load()
+    matched = []
+    for p in data["products"]:
+        sub = p.get("subcategory", "")
+        if subcategory == sub or sub.startswith(subcategory):
+            matched.append(p)
+    if not matched:
+        return _to_dict_resp(False, error=f"Не найдено карточек по {subcategory}")
+
+    rendered, needs_input, skipped, errors = [], [], [], []
+    for p in matched:
+        kind = pack_renderer.kind_from_subcategory(p.get("subcategory", ""))
+        if kind not in ("espresso", "filter"):
+            skipped.append({"id": p["id"], "reason": "no template (200г / прочее)"})
+            continue
+        if skip_if_photo and p.get("photo"):
+            # Пропускаем те у которых уже есть фото
+            skipped.append({"id": p["id"], "reason": "photo exists"})
+            continue
+        missing = pack_renderer.find_missing(p)
+        if missing:
+            needs_input.append({"id": p["id"], "name": p.get("name"),
+                                "missing": missing})
+            continue
+        # Рендерим
+        try:
+            from datetime import date
+            if not p.get("roast_date"):
+                p["roast_date"] = date.today().strftime("%d.%m.%Y")
+            if not p.get("batch"):
+                p["batch"] = "1"
+            label_data = pack_renderer.build_label_data(p)
+            out_path = PHOTOS_DIR / f"{p['id']}.jpg"
+            pack_renderer.render(kind, label_data, out_path)
+            p["photo"] = f"photos/products/{p['id']}.jpg"
+            rendered.append({"id": p["id"], "name": p.get("name"), "kind": kind})
+        except Exception as e:
+            errors.append({"id": p["id"], "error": f"{type(e).__name__}: {e}"})
+    _save(data)
+
+    return _to_dict_resp(
+        True,
+        msg=f"Отрендерено {len(rendered)}, ждут данных {len(needs_input)}, "
+            f"пропущено {len(skipped)}, ошибок {len(errors)}",
+        rendered=rendered[:50],
+        needs_input=needs_input[:50],
+        skipped=skipped[:50],
+        errors=errors[:50],
+        rendered_count=len(rendered),
+        needs_input_count=len(needs_input),
+    )
+
+
 # ── Диспетчер ──
 
 def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
@@ -501,6 +953,16 @@ def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
             return shop_send_photo(**input_data)
         if name == "shop_publish":
             return shop_publish(**input_data)
+        if name == "shop_catalog_lookup":
+            return shop_catalog_lookup(**input_data)
+        if name == "shop_render_pack":
+            return shop_render_pack(**input_data)
+        if name == "shop_render_packs_bulk":
+            return shop_render_packs_bulk(**input_data)
+        if name == "shop_set_photo_from_pdf":
+            return shop_set_photo_from_pdf(**input_data)
+        if name == "shop_set_photo_from_pending_pdf":
+            return shop_set_photo_from_pending_pdf(_user_id=user_id, **input_data)
         return _to_dict_resp(False, error=f"Неизвестный тул: {name}")
     except TypeError as e:
         return _to_dict_resp(False, error=f"Неверные аргументы для {name}: {e}")
