@@ -280,6 +280,15 @@ def has_active_shop_history(user_id: int) -> bool:
 
 SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по управлению магазином Roastberry (Telegram Mini App).
 
+🌐 ССЫЛКИ НА МАГАЗИН (выдавай ИМЕННО ЭТИ, не придумывай свои):
+— Универсальная web-ссылка (работает у всех — в Chrome/Safari и в Telegram): https://tg-bot-production-ae5c.up.railway.app/tma/
+  Слать когда: «дай ссылку на магазин», «как зайти», «как открыть магазин», «куда зайти заказать», «ссылка для клиента» — это дефолт.
+— Прямая Telegram Mini App ссылка: https://t.me/RCR_BtB_bot/rbshop
+  Слать когда явно нужен только TG-формат (например, делишься в чат TG, или клиент уже точно в Telegram). У получателя без TG она не работает.
+— Username бота: @RCR_BtB_bot
+
+❌ НЕ ВЫДУМЫВАЙ ссылки типа shop.roastberry.ru, roastberry-tma.up.railway.app, rcr-shop.com — их не существует. Если не помнишь URL — копируй один из двух выше.
+
 Тебе доступны:
 — тулы магазина: shop_search, shop_get_product, shop_list_subcategories, shop_update_field, shop_set_photo_from_url, shop_set_photo_from_telegram, shop_set_photo_from_pdf, shop_add_product, shop_remove_product, shop_send_photo, shop_publish, shop_catalog_lookup, shop_render_pack, shop_render_packs_bulk
 — тулы кофейного прайса: price_show, price_calculate, price_add, price_remove (для добавления позиций ценообразования кофе)
@@ -457,6 +466,11 @@ SHOP_SYSTEM_PROMPT_OWNER = """Ты помощник Дмитрия по упра
 
 
 SHOP_SYSTEM_PROMPT_READONLY = """Ты помощник по магазину и прайсу Roastberry. Тебе доступны: shop_search, shop_get_product, shop_list_subcategories, shop_send_photo, assortment_show, assortment_search, assortment_send_catalog, assortment_send_pricelist, price_send_file.
+
+🌐 ССЫЛКИ НА МАГАЗИН (выдавай ИМЕННО ЭТИ, не выдумывай):
+— Универсальная web-ссылка (любой браузер + TG): https://tg-bot-production-ae5c.up.railway.app/tma/
+— Mini App в Telegram: https://t.me/RCR_BtB_bot/rbshop
+По умолчанию давай web-ссылку — она работает у всех.
 
 Можешь:
 — Найти товар в магазине (TMA) и показать карточку с ценой и фото.
