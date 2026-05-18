@@ -45,7 +45,7 @@ _TOOL_SEARCH = {
         "type": "object",
         "properties": {
             "query": {"type": "string", "description": "Часть названия или категории. Пусто = все"},
-            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk","consulting",""], "description": "Опц. фильтр по категории"},
+            "category": {"type": "string", "enum": ["espresso","filter","retail","black","borshch","drip","cascara","sets","tea","syrup","milk","consulting","other",""], "description": "Опц. фильтр по категории"},
             "limit": {"type": "integer", "description": "Макс. результатов", "default": 15},
         },
     },
@@ -120,6 +120,26 @@ _TOOL_SET_PHOTO_TG = {
     },
 }
 
+_TOOL_SET_PHOTO_PENDING_PDF = {
+    "name": "shop_set_photo_from_pending_pdf",
+    "description": (
+        "Конвертировать страницу из PDF (который пользователь только что прислал "
+        "в этот же чат) в JPG и поставить как фото товара. Используй когда "
+        "Дмитрий шлёт PDF + просит «поставь как фото у X», «возьми первую "
+        "страницу как картинку для X». Если страница не указана — берём 1-ю. "
+        "Если фото уже было — заменяется. PDF удаляется из pending после применения."
+    ),
+    "input_schema": {
+        "type": "object",
+        "properties": {
+            "tma_id": {"type": "string"},
+            "page":   {"type": "integer", "description": "Номер страницы, 1-based. По умолчанию 1."},
+            "dpi":    {"type": "integer", "description": "Разрешение рендера 72-400, по умолчанию 200."},
+        },
+        "required": ["tma_id"],
+    },
+}
+
 _TOOL_ADD = {
     "name": "shop_add_product",
     "description": "Добавить новый товар в магазин. Минимум: name, category, subcategory, fasovka [(size, price)].",
@@ -127,8 +147,8 @@ _TOOL_ADD = {
         "type": "object",
         "properties": {
             "name": {"type": "string"},
-            "category": {"type": "string", "enum": ["coffee","tea","syrup","milk","consulting"]},
-            "subcategory": {"type": "string", "description": "ID подкатегории (например 'tea_althaus_loose')"},
+            "category": {"type": "string", "enum": ["espresso","filter","retail","black","borshch","drip","cascara","sets","tea","syrup","milk","consulting","other"]},
+            "subcategory": {"type": "string", "description": "ID подкатегории (например 'espresso_mono', 'tea_althaus_loose')"},
             "fasovka": {
                 "type": "array",
                 "items": {
@@ -226,8 +246,8 @@ _TOOL_RENDER_PACKS_BULK = {
     "name": "shop_render_packs_bulk",
     "description": (
         "Массово сгенерировать пакеты для всех кофейных карточек в "
-        "указанной подкатегории (например coffee_filter_microlot, "
-        "coffee_espresso_mono) или для всех coffee_espresso_*/coffee_filter_*. "
+        "указанной подкатегории (например filter_micro, espresso_mono) "
+        "или для всех espresso_*/filter_*. "
         "Возвращает список: что отрендерилось и для каких карточек не "
         "хватает данных. Не вызывай если Дмитрий не попросил массовую "
         "заливку — обычно сначала тестируется одна-две через shop_render_pack."
@@ -237,8 +257,8 @@ _TOOL_RENDER_PACKS_BULK = {
         "properties": {
             "subcategory": {
                 "type": "string",
-                "description": "Конкретная подкатегория (coffee_filter_microlot и т.д.) "
-                               "или префикс 'coffee_espresso' / 'coffee_filter' / 'coffee'.",
+                "description": "Конкретная подкатегория (filter_micro / espresso_mono / retail_espresso и т.д.) "
+                               "или префикс 'espresso' / 'filter' / 'retail'.",
             },
             "skip_if_photo": {
                 "type": "boolean",
@@ -257,7 +277,7 @@ _TOOL_RENDER_PACK = {
         "красный (эспрессо) или зелёный (фильтр) шаблон этикетку с данными "
         "позиции (имя, аромат, вкус, регион, высота, сорт, обработка, дата "
         "обжарки, партия). Шаблон выбирается автоматически по подкатегории "
-        "(coffee_espresso_* → красный, coffee_filter_* → зелёный). "
+        "(espresso_* / retail_espresso → красный, filter_* / retail_filter → зелёный). "
         "Если каких-то полей в карточке нет (region/altitude/variety/aroma/"
         "taste/roast_descr) — тул вернёт status='needs_input' со списком "
         "недостающих полей. Тогда: спроси Дмитрия, сохрани полученное через "
@@ -301,7 +321,8 @@ _TOOL_CATALOG_LOOKUP = {
 
 
 TOOLS_OWNER = [_TOOL_SEARCH, _TOOL_GET, _TOOL_LIST_SUBCATS, _TOOL_UPDATE_FIELD,
-               _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_SET_PHOTO_PDF,
+               _TOOL_SET_PHOTO_URL, _TOOL_SET_PHOTO_TG, _TOOL_SET_PHOTO_PENDING_PDF,
+               _TOOL_SET_PHOTO_PDF,
                _TOOL_ADD, _TOOL_REMOVE,
                _TOOL_SEND_PHOTO, _TOOL_PUBLISH, _TOOL_CATALOG_LOOKUP,
                _TOOL_RENDER_PACK, _TOOL_RENDER_PACKS_BULK]
@@ -441,6 +462,9 @@ def shop_set_photo_from_url(tma_id: str, url: str) -> str:
 
 # Контекст: pending photo bytes (передаются в shop_chat при наличии attached photo)
 _PENDING_PHOTO: dict[int, bytes] = {}
+# Контекст: pending PDF (как и фото — приходит документом, потом по команде
+# конвертируется в JPG и крепится как фото товара).
+_PENDING_PDF: dict[int, bytes] = {}
 
 
 def set_pending_photo(user_id: int, image_bytes: bytes) -> None:
@@ -449,6 +473,14 @@ def set_pending_photo(user_id: int, image_bytes: bytes) -> None:
 
 def clear_pending_photo(user_id: int) -> None:
     _PENDING_PHOTO.pop(user_id, None)
+
+
+def set_pending_pdf(user_id: int, pdf_bytes: bytes) -> None:
+    _PENDING_PDF[user_id] = pdf_bytes
+
+
+def clear_pending_pdf(user_id: int) -> None:
+    _PENDING_PDF.pop(user_id, None)
 
 
 def shop_set_photo_from_telegram(tma_id: str, _user_id: int = 0) -> str:
@@ -466,6 +498,23 @@ def shop_set_photo_from_telegram(tma_id: str, _user_id: int = 0) -> str:
     _save(data)
     clear_pending_photo(_user_id)
     return _to_dict_resp(True, msg=f"Фото из чата привязано к {tma_id}")
+
+
+def shop_set_photo_from_pending_pdf(tma_id: str, page: int = 1,
+                                    dpi: int = 200, _user_id: int = 0) -> str:
+    """Конвертирует страницу из присланного в чате PDF в JPG и ставит как фото."""
+    if _user_id not in _PENDING_PDF:
+        return _to_dict_resp(False, error="Нет приложенного PDF. Попроси пользователя прислать PDF в этом же сообщении.")
+    import tempfile
+    tmp = Path(tempfile.gettempdir()) / f"bishop_pdf_{_user_id}.pdf"
+    tmp.write_bytes(_PENDING_PDF[_user_id])
+    res = shop_set_photo_from_pdf(tma_id, str(tmp), page=page, dpi=dpi)
+    clear_pending_pdf(_user_id)
+    try:
+        tmp.unlink()
+    except OSError:
+        pass
+    return res
 
 
 def shop_add_product(name: str, category: str, subcategory: str,
@@ -493,8 +542,7 @@ def shop_add_product(name: str, category: str, subcategory: str,
     }
     # pair_id для микролотов — связывает 1кг (Эспрессо/Фильтр) и 200г (Блэк/Борщ)
     # карточки одной позиции, чтоб TMA показала переключатель фасовок на детальной.
-    micro_subs = ("coffee_espresso_microlot", "coffee_filter_microlot",
-                  "coffee_black", "coffee_borshch")
+    micro_subs = ("espresso_micro", "filter_micro", "black", "borshch")
     if subcategory in micro_subs:
         # Если уже есть карточка с тем же базовым именем в "парной" подкатегории —
         # берём её pair_id, иначе генерируем новый по имени.
@@ -586,6 +634,42 @@ def shop_publish(comment: str = "Bishop: shop update") -> str:
             str(GIT_REPO / "tma_static" / "photos" / "products" / ""),
             shell=True, check=False,
         )
+        # Статика TMA Mini App (index.html, sw.js, manifest, assets/) — она
+        # тоже редактируется на VPS (через Mutagen из workstation), и должна
+        # ехать в Railway вместе с каталогом. Без этого правки UI остаются
+        # только на VPS и в продакшен не попадают.
+        static_files = ["index.html", "sw.js", "manifest.webmanifest"]
+        for fn in static_files:
+            src = TMA_STATIC / fn
+            if src.exists():
+                subprocess.run(["cp", str(src), str(GIT_REPO / "tma_static" / fn)],
+                               check=False)
+        # tma_static_server.py — HTTP-сервер бота, где живут админ-API роуты.
+        # Без копирования новые роуты (карантин/pending) останутся только на VPS.
+        for srv_file in ("tma_static_server.py",):
+            src = TMA_STATIC.parent / srv_file
+            if src.exists():
+                subprocess.run(["cp", str(src), str(GIT_REPO / srv_file)],
+                               check=False)
+        # assets/ — иконки, шрифты и т.п.
+        assets_src = TMA_STATIC / "assets"
+        if assets_src.exists():
+            (GIT_REPO / "tma_static" / "assets").mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                "cp -r " + str(assets_src) + "/. " +
+                str(GIT_REPO / "tma_static" / "assets" / ""),
+                shell=True, check=False,
+            )
+        # tma_static_v2/ — параллельная сборка нового дизайна (доступна на /tma/v2/),
+        # копируется рекурсивно вместе со всеми статиками внутри.
+        v2_src = TMA_STATIC.parent / "tma_static_v2"
+        if v2_src.exists():
+            (GIT_REPO / "tma_static_v2").mkdir(parents=True, exist_ok=True)
+            subprocess.run(
+                "cp -r " + str(v2_src) + "/. " +
+                str(GIT_REPO / "tma_static_v2" / ""),
+                shell=True, check=False,
+            )
         # Свежий xlsx-прайс — live_prices_api в TG-BOT читает именно его и
         # перетирает цены кофейных карточек. Без обновления fuzzy-матч уведёт
         # новые позиции на похожие старые.
@@ -595,8 +679,15 @@ def shop_publish(comment: str = "Bishop: shop update") -> str:
             subprocess.run(["cp", str(BISHOP_PRICE_XLSX_SRC), str(xlsx_dst)], check=True)
 
         # 2. add + commit + push
-        subprocess.run(git + ["add", "tma_static/products.json",
+        subprocess.run(git + ["add",
+                              "tma_static/products.json",
                               "tma_static/photos/products/",
+                              "tma_static/index.html",
+                              "tma_static/sw.js",
+                              "tma_static/manifest.webmanifest",
+                              "tma_static/assets/",
+                              "tma_static_v2/",
+                              "tma_static_server.py",
                               BISHOP_PRICE_XLSX_DST_REL], check=True, env=env)
         result = subprocess.run(git + ["status", "--short"],
                                 check=True, capture_output=True, text=True, env=env)
@@ -878,6 +969,258 @@ def shop_render_packs_bulk(subcategory: str, skip_if_photo: bool = True) -> str:
     )
 
 
+# ─── Карантин + Pending additions (для авто-синка с 1С) ────────────────────
+
+BISHOP_DATA_DIR = Path("/root/projects/ai-agents-rb/bishoprb-agent/data")
+PENDING_JSON = BISHOP_DATA_DIR / "pending_additions.json"
+
+
+def _pending_load() -> dict:
+    if not PENDING_JSON.exists():
+        return {"updated_at": None, "items": []}
+    try:
+        return json.loads(PENDING_JSON.read_text(encoding="utf-8"))
+    except Exception:
+        return {"updated_at": None, "items": []}
+
+
+def _pending_save(data: dict) -> None:
+    BISHOP_DATA_DIR.mkdir(parents=True, exist_ok=True)
+    PENDING_JSON.write_text(json.dumps(data, ensure_ascii=False, indent=2),
+                            encoding="utf-8")
+
+
+def _now_iso() -> str:
+    return datetime.utcnow().isoformat(timespec="seconds") + "Z"
+
+
+_CATEGORY_HINT_RULES = [
+    # (substring lower, category, subcategory_id)
+
+    # Аксессуары: ВСЕ виды фильтров для кофеварок → other_filters
+    # Идут первыми чтобы перебить общее правило "фильтр" → coffee_filter_mono
+    ("hario vcf",          "other",  "other_filters"),
+    ("hario v60",          "other",  "other_filters"),
+    ("bravilor",           "other",  "other_filters"),
+    ("лехехе",             "other",  "other_filters"),
+    ("фильтры бумажные",   "other",  "other_filters"),
+    ("бумажный фильтр",    "other",  "other_filters"),
+    ("бумажные фильтр",    "other",  "other_filters"),
+    ("фильтр-пакеты niktea","other", "other_filters"),
+
+    # Каскара (кофейные ягоды) — отдельная категория v2
+    ("каскара",            "cascara", None),
+    ("cascara",            "cascara", None),
+    ("кофейная шелуха",    "cascara", None),
+
+    # Дрипы / фильтр-пакеты как кофе-формат
+    ("дрип-пакет",         "drip",    "drip_loose"),     # «валом» обычно у этих → loose, перебивается ниже если "8 фильтр-пакет"
+    ("дп \"",              "drip",    "drip_8pack"),
+    ("8 фильтр-пакет",     "drip",    "drip_8pack"),
+
+    # Наборы / семплы
+    ("семпл-бокс",         "sets",    None),
+    ("семпл бокс",         "sets",    None),
+
+    # Кофе по формату — линейки Roastberry
+    # BLACK / BORЩ — 200г retail edition с отдельными категориями v2
+    ("roastberry black",   "black",   None),
+    (" black",             "black",   None),
+    (" black\"",           "black",   None),
+    ("borщ",               "borshch", None),
+    (" borщ",              "borshch", None),
+
+    # Retail Roastberry (1кг + 200г фасовка с одним брендом)
+    ("be \"roastberry\"",  "retail",  "retail_blend"),
+    ("bf \"roastberry\"",  "retail",  "retail_blend"),
+    ("e \"roastberry\"",   "retail",  "retail_espresso"),
+    ("f \"roastberry\"",   "retail",  "retail_filter"),
+
+    # ESPRESSO RBR / FILTER RBR (опт 1кг)
+    (" - filter",          "filter",  "filter_mono"),
+    ("- filter",           "filter",  "filter_mono"),
+    ("эспрессо",           "espresso","espresso_mono"),
+    ("espresso",           "espresso","espresso_mono"),
+
+    # Чаи
+    ("rb tea",             "tea",    "tea_rbr_tea_loose"),
+    ("rbr tea",            "tea",    "tea_rbr_tea_loose"),
+    ("китайский чай",      "tea",    "tea_китайский_чай_loose"),
+    ("niktea",             "tea",    "tea_niktea_pyr"),
+    ("althaus",            "tea",    "tea_althaus_loose"),
+    ("чн0",                "tea",    None),
+    ("чн1",                "tea",    None),
+    ("чн2",                "tea",    None),
+    ("чн3",                "tea",    None),
+    ("чн4",                "tea",    None),
+    ("чн5",                "tea",    None),
+    ("чн6",                "tea",    None),
+    ("ts1",                "tea",    None),
+    ("ts2",                "tea",    None),
+    ("ts3",                "tea",    None),
+    ("ts4",                "tea",    None),
+    ("чай",                "tea",    None),
+
+    # Сиропы / Топпинги
+    ("barline 1,0 л",      "syrup",  "syr_barline"),
+    ("barline 1 кг",       "syrup",  "syr_barline"),
+    ("botanika",           "syrup",  "syr_botanika"),
+    ("гербариста",         "syrup",  "syr_herbarista"),
+    ("herbarista",         "syrup",  "syr_herbarista"),
+    ("sweetshot",          "syrup",  "syr_sweetshot"),
+    ("сироп",              "syrup",  None),
+    ("топпинг",            "syrup",  None),
+    ("кордиал",            "syrup",  None),
+
+    # Молоко
+    ("green milk",         "milk",   "milk_main"),
+    ("молоко домик",       "milk",   None),
+    ("соевой основе",      "milk",   "milk_main"),
+    ("растительное",       "milk",   "milk_main"),
+]
+
+
+def _hint_category(name: str) -> tuple[str | None, str | None]:
+    """Эвристика: по имени из 1С угадываем category/subcategory. Точное правило выигрывает первым."""
+    n = (name or "").lower()
+    for needle, cat, sub in _CATEGORY_HINT_RULES:
+        if needle in n:
+            return cat, sub
+    # дефолт для кофе по весу 1 кг
+    if " 1 кг" in n and any(x in n for x in ("бразилия","колумбия","эфиопия","кения","перу","руанда","уганда","гватемала","коста","гондурас","никарагуа","танзания","мексика","индонезия","бурунди")):
+        return "coffee", "coffee_espresso_mono"
+    return None, None
+
+
+def shop_set_quarantine(tma_id: str, on: bool, reason: str = "") -> str:
+    """Помечает товар как карантин/снимает карантин. on=True ставит карантин и
+    зануляет stock. on=False снимает карантин, stock не трогает (предполагается,
+    что вызывающий сам обновит)."""
+    data = _load()
+    p = next((x for x in data["products"] if x["id"] == tma_id), None)
+    if not p:
+        return _to_dict_resp(False, error=f"Товар не найден: {tma_id}")
+    if on:
+        if not p.get("quarantined"):
+            p["quarantined"] = True
+            p["quarantined_at"] = _now_iso()
+            p["quarantine_reason"] = reason or ""
+        p["stock"] = 0
+    else:
+        # снимаем карантин (если был)
+        if p.get("quarantined"):
+            p["quarantined"] = False
+            p["quarantined_at"] = None
+            p["quarantine_reason"] = None
+    _save(data)
+    return _to_dict_resp(True, msg=f"quarantine={on}", tma_id=tma_id)
+
+
+def shop_set_stock(tma_id: str, stock: int) -> str:
+    data = _load()
+    p = next((x for x in data["products"] if x["id"] == tma_id), None)
+    if not p:
+        return _to_dict_resp(False, error=f"Товар не найден: {tma_id}")
+    p["stock"] = int(stock)
+    _save(data)
+    return _to_dict_resp(True, msg=f"stock={stock}", tma_id=tma_id)
+
+
+def shop_list_quarantine() -> str:
+    """Список товаров в карантине (для админки)."""
+    data = _load()
+    items = [p for p in data["products"] if p.get("quarantined")]
+    return _to_dict_resp(True, count=len(items), items=items)
+
+
+def shop_pending_list() -> str:
+    """Список «к добавлению» (с эвристическими подсказками)."""
+    d = _pending_load()
+    items = []
+    for it in d.get("items", []):
+        name = it.get("name", "")
+        hint_cat, hint_sub = it.get("hint_category"), it.get("hint_subcategory")
+        if not hint_cat:
+            hint_cat, hint_sub = _hint_category(name)
+        items.append({
+            **it,
+            "hint_category": hint_cat,
+            "hint_subcategory": hint_sub,
+        })
+    return _to_dict_resp(True, count=len(items),
+                         updated_at=d.get("updated_at"), items=items)
+
+
+def shop_pending_set(items: list[dict]) -> str:
+    """Перезаписывает список pending (вызывает sync-скрипт). items: [{name, qty}]."""
+    d = _pending_load()
+    seen_names = {it.get("name") for it in d.get("items", [])}
+    now = _now_iso()
+    out = []
+    new_names = set()
+    for it in items:
+        nm = (it.get("name") or "").strip()
+        if not nm:
+            continue
+        new_names.add(nm)
+        qty = it.get("qty") or 0
+        prev = next((p for p in d.get("items", []) if p.get("name") == nm), None)
+        first = prev["first_seen"] if prev else now
+        hint_cat, hint_sub = _hint_category(nm)
+        out.append({
+            "name": nm, "qty": qty,
+            "first_seen": first, "last_seen": now,
+            "hint_category": hint_cat, "hint_subcategory": hint_sub,
+        })
+    d = {"updated_at": now, "items": out}
+    _pending_save(d)
+    added = len(new_names - seen_names)
+    removed = len(seen_names - new_names)
+    return _to_dict_resp(True, total=len(out), added=added, removed=removed)
+
+
+def shop_pending_remove(name: str) -> str:
+    d = _pending_load()
+    before = len(d.get("items", []))
+    d["items"] = [it for it in d.get("items", []) if it.get("name") != name]
+    d["updated_at"] = _now_iso()
+    _pending_save(d)
+    return _to_dict_resp(True, removed=(before - len(d["items"])))
+
+
+def shop_create_from_pending(name: str, category: str, subcategory: str,
+                             fasovka: list, description: str = "",
+                             country: str = "", roast: str = "",
+                             process: str = "", stock: int = 0) -> str:
+    """Создаёт карточку в каталоге и удаляет соответствующую запись из pending.
+    fasovka: [{size, price}, ...]"""
+    if not name or not category or not subcategory:
+        return _to_dict_resp(False, error="name, category, subcategory обязательны")
+    if not fasovka or not isinstance(fasovka, list):
+        return _to_dict_resp(False, error="fasovka должен быть непустым списком {size, price}")
+    # Валидация фасовок
+    clean = []
+    for f in fasovka:
+        if not isinstance(f, dict): continue
+        sz = (f.get("size") or "").strip()
+        try:
+            price = float(f.get("price") or 0)
+        except (TypeError, ValueError):
+            return _to_dict_resp(False, error=f"price для '{sz}' должен быть числом")
+        if not sz or price <= 0:
+            return _to_dict_resp(False, error="size и price > 0 обязательны")
+        clean.append({"size": sz, "price": price, "photo": None})
+    res_json = shop_add_product(
+        name=name, category=category, subcategory=subcategory,
+        fasovka=clean, description=description, country=country,
+        roast=roast, process=process, stock=stock,
+    )
+    res = json.loads(res_json)
+    if res.get("ok"):
+        shop_pending_remove(name)
+    return res_json
+
+
 # ── Диспетчер ──
 
 def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
@@ -912,6 +1255,8 @@ def execute_tool(name: str, input_data: dict, user_id: int = 0) -> str:
             return shop_render_packs_bulk(**input_data)
         if name == "shop_set_photo_from_pdf":
             return shop_set_photo_from_pdf(**input_data)
+        if name == "shop_set_photo_from_pending_pdf":
+            return shop_set_photo_from_pending_pdf(_user_id=user_id, **input_data)
         return _to_dict_resp(False, error=f"Неизвестный тул: {name}")
     except TypeError as e:
         return _to_dict_resp(False, error=f"Неверные аргументы для {name}: {e}")
